@@ -10,12 +10,13 @@
 - [x] MeetAgentConfig（TOML設定スキーマ）
 - [x] brain.rs リファクタ（trait呼び出し化）
 
-### 🔲 Phase 2: 自前プロバイダー実装
-- [ ] google_stt.rs — Google Cloud Speech-to-Text v2
-- [ ] gemini_llm.rs — Gemini Flash (OpenAI互換エンドポイント)
-- [ ] google_tts.rs — Google Cloud Text-to-Speech
-- [ ] factory.rs 更新 — "google"/"gemini" マッピング追加
-- [ ] mod.rs 更新 — モジュール登録
+### ✅ Phase 2: 自前プロバイダー実装（完了）
+- [x] google_stt.rs — Google Cloud Speech-to-Text v1 REST API
+- [x] gemini_llm.rs — Gemini Flash (OpenAI互換エンドポイント)
+- [x] google_tts.rs — Google Cloud Text-to-Speech v1 REST API
+- [x] factory.rs 更新 — "google"/"gemini" マッピング追加（init失敗時tinyhumansフォールバック付き）
+- [x] mod.rs 更新 — モジュール登録
+- [x] cargo check 通過確認
 
 ### 🔲 Phase 3: ビルド検証
 - [ ] `cargo check` 通過確認
