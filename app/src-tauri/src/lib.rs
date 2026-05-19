@@ -5,6 +5,7 @@ mod cdp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod cef_preflight;
 mod cef_profile;
+mod companion_commands;
 mod core_process;
 mod core_rpc;
 mod dictation_hotkeys;
@@ -2268,6 +2269,9 @@ pub fn run() {
         .manage(dictation_hotkeys::DictationHotkeyState(
             std::sync::Mutex::new(Vec::new()),
         ))
+        .manage(companion_commands::CompanionHotkeyState(
+            std::sync::Mutex::new(Vec::new()),
+        ))
         .manage(webview_accounts::WebviewAccountsState::default())
         .manage(notification_settings::NotificationSettingsState::new())
         .manage(PendingAppUpdateState::default());
@@ -2928,7 +2932,10 @@ pub fn run() {
             file_logging::reveal_logs_folder,
             file_logging::logs_folder_path,
             meet_call::meet_call_open_window,
-            meet_call::meet_call_close_window
+            meet_call::meet_call_close_window,
+            companion_commands::register_companion_hotkey,
+            companion_commands::unregister_companion_hotkey,
+            companion_commands::companion_activate
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
