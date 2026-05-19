@@ -124,15 +124,30 @@ impl TextToSpeech for GoogleTts {
             .decode(audio_b64.as_bytes())
             .map_err(|e| format!("google TTS base64 decode: {e}"))?;
 
-        if !pcm_bytes.len().is_multiple_of(2) {
+        // 4. Google's LINEAR16 response is a complete WAV file (44-byte
+        //    RIFF header + PCM data), but the shell expects headerless
+        //    PCM16. Strip the header when present so the first ~22ms of
+        //    output isn't noise.
+        let pcm_data: &[u8] = if pcm_bytes.starts_with(b"RIFF") {
+            const WAV_HEADER_LEN: usize = 44;
+            if pcm_bytes.len() > WAV_HEADER_LEN {
+                &pcm_bytes[WAV_HEADER_LEN..]
+            } else {
+                &pcm_bytes[..]
+            }
+        } else {
+            &pcm_bytes[..]
+        };
+
+        if !pcm_data.len().is_multiple_of(2) {
             return Err(format!(
                 "google TTS odd byte length: {}",
-                pcm_bytes.len()
+                pcm_data.len()
             ));
         }
 
-        // 4. Convert bytes to Vec<i16> (PCM16LE).
-        let samples: Vec<i16> = pcm_bytes
+        // 5. Convert bytes to Vec<i16> (PCM16LE).
+        let samples: Vec<i16> = pcm_data
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
