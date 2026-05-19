@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::tinyhumans::strip_for_speech;
 use super::MeetingLLM;
-use super::super::providers::tinyhumans::strip_for_speech;
 use crate::openhuman::config::schema::MeetAgentConfig;
 
 /// Default Gemini model.
