@@ -125,13 +125,167 @@ impl MeetingLLM for GeminiLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::ConversationTurn;
+    use crate::openhuman::config::TEST_ENV_LOCK;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a `GeminiLlm` pointed at a wiremock URI.
+    fn llm_at(base_url: &str) -> GeminiLlm {
+        GeminiLlm {
+            api_key: "test-key".to_string(),
+            model: "gemini-2.5-flash".to_string(),
+            base_url: base_url.to_string(),
+            client: Client::new(),
+        }
+    }
+
+    fn chat_response(content: &str) -> Value {
+        json!({
+            "id": "test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": content },
+                "finish_reason": "stop"
+            }]
+        })
+    }
 
     /// Verify that `from_config` fails gracefully when no key is available.
     #[test]
     fn from_config_rejects_missing_api_key() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(ENV_API_KEY);
         let config = MeetAgentConfig::default();
         let result = GeminiLlm::from_config(&config);
         assert!(result.is_err(), "should fail without API key");
+    }
+
+    #[tokio::test]
+    async fn reply_returns_text_from_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("Hi there")))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        let reply = llm
+            .reply("hello", &[], "system", 100)
+            .await
+            .expect("reply ok");
+        assert!(reply.contains("Hi there"), "got: {reply}");
+    }
+
+    #[tokio::test]
+    async fn reply_strips_markdown_for_speech() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_response(
+                "**bold** and `code` and more\n```\nfenced\n```\n- bullet",
+            )))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        let reply = llm
+            .reply("hi", &[], "sys", 100)
+            .await
+            .expect("reply ok");
+        assert!(!reply.contains('*'), "asterisks should be stripped: {reply}");
+        assert!(!reply.contains('`'), "backticks should be stripped: {reply}");
+        assert!(!reply.contains("fenced"), "fenced block should be removed: {reply}");
+    }
+
+    #[tokio::test]
+    async fn reply_handles_empty_choices() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "choices": [] })))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        let result = llm.reply("hi", &[], "sys", 100).await;
+        assert!(result.is_err(), "empty choices should error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn reply_handles_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        let result = llm.reply("hi", &[], "sys", 100).await;
+        assert!(result.is_err(), "5xx should error");
+        assert!(result.unwrap_err().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn reply_includes_history() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("ok")))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        let history = vec![
+            ConversationTurn {
+                role: "user".to_string(),
+                content: "previous question".to_string(),
+            },
+            ConversationTurn {
+                role: "assistant".to_string(),
+                content: "previous answer".to_string(),
+            },
+        ];
+        llm.reply("now what", &history, "sys-prompt", 100)
+            .await
+            .expect("reply ok");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let messages = body["messages"].as_array().expect("messages array");
+        // system + 2 history + user prompt = 4
+        assert_eq!(messages.len(), 4, "messages: {messages:?}");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "sys-prompt");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "previous question");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "previous answer");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[3]["content"], "now what");
+    }
+
+    #[tokio::test]
+    async fn reply_sends_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("ok")))
+            .mount(&server)
+            .await;
+
+        let llm = llm_at(&server.uri());
+        llm.reply("hi", &[], "sys", 100).await.expect("reply ok");
+
+        let requests = server.received_requests().await.unwrap();
+        let auth = requests[0]
+            .headers
+            .get("authorization")
+            .expect("authorization header present");
+        assert_eq!(auth.to_str().unwrap(), "Bearer test-key");
     }
 }

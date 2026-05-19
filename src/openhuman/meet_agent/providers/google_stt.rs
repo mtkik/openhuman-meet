@@ -21,12 +21,15 @@ const DEFAULT_MODEL: &str = "chirp_2";
 const DEFAULT_LANGUAGE: &str = "ja-JP";
 /// Environment variable checked when no API key is in config.
 const ENV_API_KEY: &str = "GOOGLE_API_KEY";
+/// Default Google Speech API base URL.
+const DEFAULT_BASE_URL: &str = "https://speech.googleapis.com";
 
 /// Google Cloud Speech-to-Text provider.
 pub struct GoogleStt {
     api_key: String,
     model: String,
     language: String,
+    base_url: String,
     client: Client,
 }
 
@@ -52,10 +55,15 @@ impl GoogleStt {
 
         let language = DEFAULT_LANGUAGE.to_string();
 
+        let base_url = google_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
         Ok(Self {
             api_key,
             model,
             language,
+            base_url,
             client: Client::new(),
         })
     }
@@ -72,8 +80,8 @@ impl SpeechToText for GoogleStt {
 
         // 3. POST to the v1 recognize endpoint.
         let url = format!(
-            "https://speech.googleapis.com/v1/speech:recognize?key={}",
-            self.api_key
+            "{}/v1/speech:recognize?key={}",
+            self.base_url, self.api_key
         );
         let body = json!({
             "config": {
@@ -126,14 +134,114 @@ impl SpeechToText for GoogleStt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openhuman::config::schema::ProviderConfig;
+    use crate::openhuman::config::TEST_ENV_LOCK;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a `GoogleStt` pointed at a wiremock URI.
+    fn stt_at(base_url: &str) -> GoogleStt {
+        GoogleStt {
+            api_key: "test-key".to_string(),
+            model: "chirp_2".to_string(),
+            language: "ja-JP".to_string(),
+            base_url: base_url.to_string(),
+            client: Client::new(),
+        }
+    }
 
     /// Verify that `from_config` fails gracefully when no key is available.
     #[test]
     fn from_config_rejects_missing_api_key() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env var is not set for this test.
         std::env::remove_var(ENV_API_KEY);
         let config = MeetAgentConfig::default();
         let result = GoogleStt::from_config(&config);
         assert!(result.is_err(), "should fail without API key");
+    }
+
+    #[tokio::test]
+    async fn transcribe_returns_text_from_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech:recognize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "alternatives": [{ "transcript": "hello world" }]
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let stt = stt_at(&server.uri());
+        let pcm = vec![0i16; 1600]; // 100ms silence @ 16kHz
+        let text = stt.transcribe(&pcm, 16_000).await.expect("transcribe ok");
+        assert_eq!(text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn transcribe_returns_error_on_api_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech:recognize"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let stt = stt_at(&server.uri());
+        let result = stt.transcribe(&vec![0i16; 1600], 16_000).await;
+        assert!(result.is_err(), "5xx response should produce Err");
+        let err = result.unwrap_err();
+        assert!(err.contains("500"), "error should mention status: {err}");
+    }
+
+    #[tokio::test]
+    async fn transcribe_returns_empty_on_no_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech:recognize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let stt = stt_at(&server.uri());
+        let text = stt
+            .transcribe(&vec![0i16; 1600], 16_000)
+            .await
+            .expect("empty results should still parse");
+        assert_eq!(text, "", "no results → empty transcript");
+    }
+
+    #[test]
+    fn from_config_reads_env_var() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_API_KEY, "env-key-stt");
+        let config = MeetAgentConfig::default();
+        let result = GoogleStt::from_config(&config);
+        // Clean up before assertion so failure doesn't leak the env var.
+        std::env::remove_var(ENV_API_KEY);
+        let stt = result.expect("env var should satisfy from_config");
+        assert_eq!(stt.api_key, "env-key-stt");
+    }
+
+    #[test]
+    fn from_config_reads_provider_config() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(ENV_API_KEY);
+        let mut config = MeetAgentConfig::default();
+        config.providers.insert(
+            "google".to_string(),
+            ProviderConfig {
+                api_key: Some("config-key".to_string()),
+                stt_model: Some("chirp_3".to_string()),
+                ..Default::default()
+            },
+        );
+        let stt = GoogleStt::from_config(&config).expect("config key should satisfy");
+        assert_eq!(stt.api_key, "config-key");
+        assert_eq!(stt.model, "chirp_3");
     }
 }

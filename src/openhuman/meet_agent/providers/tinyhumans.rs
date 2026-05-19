@@ -179,3 +179,117 @@ pub fn extract_chat_completion_text(raw: &Value) -> Option<String> {
         .and_then(|s| s.as_str())
         .map(|s| s.trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openhuman::config::TEST_ENV_LOCK;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    // ── Pure-function tests ──────────────────────────────────────────
+
+    #[test]
+    fn strip_for_speech_removes_markdown() {
+        let input = "**bold** `code` and more\n```\nfenced code\n```\n- bullet";
+        let out = strip_for_speech(input);
+        assert!(!out.contains('*'), "asterisks remain: {out}");
+        assert!(!out.contains('`'), "backticks remain: {out}");
+        assert!(!out.contains("fenced"), "fenced block not stripped: {out}");
+        assert!(out.contains("bold"), "content lost: {out}");
+        assert!(out.contains("bullet"), "bullet text lost: {out}");
+    }
+
+    #[test]
+    fn strip_for_speech_preserves_punctuation() {
+        let out = strip_for_speech("Hello, world. How are you?");
+        assert_eq!(out, "Hello, world. How are you?");
+    }
+
+    #[test]
+    fn strip_for_speech_drops_empty_lines() {
+        let out = strip_for_speech("first\n\n\nsecond");
+        assert_eq!(out, "first second");
+    }
+
+    #[test]
+    fn extract_chat_completion_text_parses_standard_response() {
+        let raw = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "  hello there  " }
+            }]
+        });
+        assert_eq!(
+            extract_chat_completion_text(&raw),
+            Some("hello there".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_chat_completion_text_returns_none_on_empty() {
+        assert_eq!(extract_chat_completion_text(&json!({ "choices": [] })), None);
+    }
+
+    #[test]
+    fn extract_chat_completion_text_returns_none_on_missing_content() {
+        let raw = json!({ "choices": [{ "message": { "role": "assistant" } }] });
+        assert_eq!(extract_chat_completion_text(&raw), None);
+    }
+
+    #[test]
+    fn extract_chat_completion_text_returns_none_on_missing_choices() {
+        assert_eq!(extract_chat_completion_text(&json!({})), None);
+    }
+
+    // ── No-session-token error path tests ────────────────────────────
+    //
+    // These exercise the tinyhumans providers when no backend session
+    // token is configured. We point OPENHUMAN_WORKSPACE at a fresh
+    // tempdir so `load_config_with_timeout()` sees a clean state, then
+    // assert each provider returns an Err (rather than panicking or
+    // hanging). The TEST_ENV_LOCK serialises env mutation across the
+    // crate's test modules.
+
+    #[tokio::test]
+    async fn tinyhumans_stt_returns_error_without_token() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        std::env::set_var("OPENHUMAN_WORKSPACE", tmp.path());
+
+        let stt = TinyhumansStt;
+        let result = stt.transcribe(&vec![0i16; 1600], 16_000).await;
+
+        std::env::remove_var("OPENHUMAN_WORKSPACE");
+        assert!(result.is_err(), "stt without token should err");
+    }
+
+    #[tokio::test]
+    async fn tinyhumans_llm_returns_error_without_token() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        std::env::set_var("OPENHUMAN_WORKSPACE", tmp.path());
+
+        let llm = TinyhumansLlm;
+        let result = llm.reply("hi", &[], "sys", 100).await;
+
+        std::env::remove_var("OPENHUMAN_WORKSPACE");
+        let err = result.expect_err("llm without token should err");
+        assert!(
+            err.contains("session token") || err.contains("no backend"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinyhumans_tts_returns_error_without_token() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        std::env::set_var("OPENHUMAN_WORKSPACE", tmp.path());
+
+        let tts = TinyhumansTts;
+        let result = tts.synthesize("hello", 16_000).await;
+
+        std::env::remove_var("OPENHUMAN_WORKSPACE");
+        assert!(result.is_err(), "tts without token should err");
+    }
+}

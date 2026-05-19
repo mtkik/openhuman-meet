@@ -18,12 +18,15 @@ const DEFAULT_VOICE: &str = "ja-JP-Standard-A";
 const DEFAULT_LANGUAGE: &str = "ja-JP";
 /// Environment variable checked when no API key is in config.
 const ENV_API_KEY: &str = "GOOGLE_API_KEY";
+/// Default Google Text-to-Speech API base URL.
+const DEFAULT_BASE_URL: &str = "https://texttospeech.googleapis.com";
 
 /// Google Cloud Text-to-Speech provider.
 pub struct GoogleTts {
     api_key: String,
     voice: String,
     language: String,
+    base_url: String,
     client: Client,
 }
 
@@ -50,10 +53,15 @@ impl GoogleTts {
 
         let language = DEFAULT_LANGUAGE.to_string();
 
+        let base_url = google_cfg
+            .and_then(|c| c.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
         Ok(Self {
             api_key,
             voice,
             language,
+            base_url,
             client: Client::new(),
         })
     }
@@ -64,8 +72,8 @@ impl TextToSpeech for GoogleTts {
     async fn synthesize(&self, text: &str, sample_rate: u32) -> Result<Vec<i16>, String> {
         // 1. POST to Google TTS endpoint.
         let url = format!(
-            "https://texttospeech.googleapis.com/v1/text:synthesize?key={}",
-            self.api_key
+            "{}/v1/text:synthesize?key={}",
+            self.base_url, self.api_key
         );
         let body = json!({
             "input": { "text": text },
@@ -129,13 +137,103 @@ impl TextToSpeech for GoogleTts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openhuman::config::TEST_ENV_LOCK;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a `GoogleTts` pointed at a wiremock URI.
+    fn tts_at(base_url: &str) -> GoogleTts {
+        GoogleTts {
+            api_key: "test-key".to_string(),
+            voice: "ja-JP-Standard-A".to_string(),
+            language: "ja-JP".to_string(),
+            base_url: base_url.to_string(),
+            client: Client::new(),
+        }
+    }
+
+    /// Encode 100ms of silence (PCM16LE @ 16kHz, 1600 samples = 3200 bytes) as base64.
+    fn silence_b64() -> String {
+        let bytes = vec![0u8; 3200];
+        B64.encode(&bytes)
+    }
 
     /// Verify that `from_config` fails gracefully when no key is available.
     #[test]
     fn from_config_rejects_missing_api_key() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(ENV_API_KEY);
         let config = MeetAgentConfig::default();
         let result = GoogleTts::from_config(&config);
         assert!(result.is_err(), "should fail without API key");
+    }
+
+    #[tokio::test]
+    async fn synthesize_returns_pcm() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text:synthesize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "audioContent": silence_b64(),
+            })))
+            .mount(&server)
+            .await;
+
+        let tts = tts_at(&server.uri());
+        let pcm = tts.synthesize("hello", 16_000).await.expect("synth ok");
+        // 3200 bytes → 1600 i16 samples.
+        assert_eq!(pcm.len(), 1600);
+        assert!(pcm.iter().all(|&s| s == 0));
+    }
+
+    #[tokio::test]
+    async fn synthesize_handles_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text:synthesize"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let tts = tts_at(&server.uri());
+        let result = tts.synthesize("hello", 16_000).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn synthesize_handles_invalid_base64() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text:synthesize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "audioContent": "not-valid-base64!!!",
+            })))
+            .mount(&server)
+            .await;
+
+        let tts = tts_at(&server.uri());
+        let result = tts.synthesize("hello", 16_000).await;
+        assert!(result.is_err(), "invalid base64 should error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("base64"),
+            "error should mention base64: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesize_handles_missing_audio_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text:synthesize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let tts = tts_at(&server.uri());
+        let result = tts.synthesize("hello", 16_000).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("audioContent"));
     }
 }
