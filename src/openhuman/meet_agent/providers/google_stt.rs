@@ -78,11 +78,12 @@ impl SpeechToText for GoogleStt {
         // 2. Encode WAV bytes as base64.
         let audio_b64 = B64.encode(&wav_bytes);
 
-        // 3. POST to the v1 recognize endpoint.
-        let url = format!(
-            "{}/v1/speech:recognize?key={}",
-            self.base_url, self.api_key
-        );
+        // 3. POST to the v1 recognize endpoint. Pass the API key in the
+        //    `X-goog-api-key` header rather than the URL query string —
+        //    `reqwest`'s error Display includes the request URL, so a
+        //    `?key=...` query param would leak the key into logs on any
+        //    transport failure.
+        let url = format!("{}/v1/speech:recognize", self.base_url);
         let body = json!({
             "config": {
                 "encoding": "LINEAR16",
@@ -98,10 +99,14 @@ impl SpeechToText for GoogleStt {
         let resp = self
             .client
             .post(&url)
+            .header("X-goog-api-key", &self.api_key)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("google STT request failed: {e}"))?;
+            // Intentionally drop the raw reqwest error — it formats the
+            // request URL, which we want to keep out of logs even though
+            // the key now lives in a header.
+            .map_err(|_| "google STT HTTP request failed".to_string())?;
 
         if !resp.status().is_success() {
             let status = resp.status();

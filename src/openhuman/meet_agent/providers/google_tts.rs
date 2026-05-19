@@ -70,11 +70,11 @@ impl GoogleTts {
 #[async_trait]
 impl TextToSpeech for GoogleTts {
     async fn synthesize(&self, text: &str, sample_rate: u32) -> Result<Vec<i16>, String> {
-        // 1. POST to Google TTS endpoint.
-        let url = format!(
-            "{}/v1/text:synthesize?key={}",
-            self.base_url, self.api_key
-        );
+        // 1. POST to Google TTS endpoint. Pass the API key via the
+        //    `X-goog-api-key` header — `reqwest`'s error Display includes
+        //    the URL, so a `?key=...` query param would leak the key
+        //    into logs on transport failures.
+        let url = format!("{}/v1/text:synthesize", self.base_url);
         let body = json!({
             "input": { "text": text },
             "voice": {
@@ -90,10 +90,14 @@ impl TextToSpeech for GoogleTts {
         let resp = self
             .client
             .post(&url)
+            .header("X-goog-api-key", &self.api_key)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("google TTS request failed: {e}"))?;
+            // Drop the raw reqwest error — it formats the request URL,
+            // which we keep out of logs even though the key now lives
+            // in a header.
+            .map_err(|_| "google TTS HTTP request failed".to_string())?;
 
         if !resp.status().is_success() {
             let status = resp.status();
