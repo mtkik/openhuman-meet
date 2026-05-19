@@ -62,7 +62,10 @@ impl GoogleTts {
             voice,
             language,
             base_url,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .expect("http client build"),
         })
     }
 }
