@@ -43,5 +43,8 @@ pub trait TextToSpeech: Send + Sync {
 }
 
 pub mod factory;
+pub mod gemini_llm;
+pub mod google_stt;
+pub mod google_tts;
 pub mod noop;
 pub mod tinyhumans;
