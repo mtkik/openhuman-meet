@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 
-use super::{ConversationTurn, MeetingLLM, SpeechToText, TextToSpeech};
+use super::{
+    extract_chat_completion_text, ConversationTurn, MeetingLLM, SpeechToText, TextToSpeech,
+};
 use crate::openhuman::meet_agent::wav;
 
 // ─── STT ─────────────────────────────────────────────────────────────
@@ -168,20 +170,9 @@ pub fn strip_for_speech(text: &str) -> String {
     out.trim().to_string()
 }
 
-/// Extract the assistant reply text from an OpenAI-compatible
-/// chat-completions JSON response.
-pub fn extract_chat_completion_text(raw: &Value) -> Option<String> {
-    raw.get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|first| first.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|s| s.as_str())
-        .map(|s| s.trim().to_string())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::extract_chat_completion_text;
     use super::*;
     use crate::openhuman::config::TEST_ENV_LOCK;
     use serde_json::json;

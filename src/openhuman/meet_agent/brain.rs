@@ -483,7 +483,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            super::super::providers::tinyhumans::extract_chat_completion_text(&raw),
+            super::super::providers::extract_chat_completion_text(&raw),
             Some("hello world".to_string())
         );
     }
@@ -491,11 +491,11 @@ mod tests {
     #[test]
     fn extract_chat_completion_text_returns_none_on_malformed() {
         assert_eq!(
-            super::super::providers::tinyhumans::extract_chat_completion_text(&json!({})),
+            super::super::providers::extract_chat_completion_text(&json!({})),
             None
         );
         assert_eq!(
-            super::super::providers::tinyhumans::extract_chat_completion_text(&json!({ "choices": [] })),
+            super::super::providers::extract_chat_completion_text(&json!({ "choices": [] })),
             None
         );
     }

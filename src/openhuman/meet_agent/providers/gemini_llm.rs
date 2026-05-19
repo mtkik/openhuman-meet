@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::extract_chat_completion_text;
 use super::tinyhumans::strip_for_speech;
 use super::MeetingLLM;
 use crate::openhuman::config::schema::MeetAgentConfig;
@@ -110,18 +111,12 @@ impl MeetingLLM for GeminiLlm {
             .await
             .map_err(|e| format!("gemini LLM JSON parse: {e}"))?;
 
-        // 3. Parse: choices[0].message.content
-        let content = raw
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|first| first.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|s| s.as_str())
+        // 3. Parse: choices[0].message.content (shared OpenAI shape).
+        let content = extract_chat_completion_text(&raw)
             .ok_or_else(|| format!("gemini LLM unexpected response: {raw}"))?;
 
         // 4. Apply strip_for_speech for TTS-friendly output.
-        Ok(strip_for_speech(content))
+        Ok(strip_for_speech(&content))
     }
 }
 

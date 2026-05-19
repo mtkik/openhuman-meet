@@ -7,12 +7,27 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Conversation turn for LLM history context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub role: String,
     pub content: String,
+}
+
+/// Extract the assistant reply text from an OpenAI-compatible
+/// chat-completions JSON response (`choices[0].message.content`).
+/// Returns `None` when the response is missing the expected shape so
+/// callers can attach their own provider-specific error context.
+pub fn extract_chat_completion_text(raw: &Value) -> Option<String> {
+    raw.get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
 }
 
 /// STT provider trait.
