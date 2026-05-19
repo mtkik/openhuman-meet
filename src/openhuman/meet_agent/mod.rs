@@ -36,6 +36,7 @@
 
 pub mod brain;
 pub mod ops;
+pub mod providers;
 pub mod rpc;
 pub mod schemas;
 pub mod session;
