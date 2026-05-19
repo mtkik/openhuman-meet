@@ -15,8 +15,9 @@ use super::SpeechToText;
 use crate::openhuman::config::schema::MeetAgentConfig;
 use crate::openhuman::meet_agent::wav;
 
-/// Default Google STT model (Chirp 2).
-const DEFAULT_MODEL: &str = "chirp_2";
+/// Default Google STT model. `chirp_2` only works on the v2 endpoint;
+/// we POST to v1 `speech:recognize`, so use a v1-valid model name.
+const DEFAULT_MODEL: &str = "latest_long";
 /// Default language code for Japanese.
 const DEFAULT_LANGUAGE: &str = "ja-JP";
 /// Environment variable checked when no API key is in config.
