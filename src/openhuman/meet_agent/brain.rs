@@ -79,9 +79,10 @@ const SAMPLE_RATE_HZ: u32 = super::ops::REQUIRED_SAMPLE_RATE;
 /// push that flagged the wake word; subsequent calls before the
 /// delay expires are coalesced via the session's `wake_active` flag.
 ///
-/// This overload uses the default (tinyhumans) providers.
+/// This overload loads the configured providers (via `load_providers`),
+/// falling back to tinyhumans when no config is available.
 pub async fn run_caption_turn(request_id: &str) -> Result<bool, String> {
-    let (stt, llm, tts) = factory::create_default_providers();
+    let (stt, llm, tts) = load_providers().await;
     run_caption_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
 }
 
@@ -201,10 +202,31 @@ fn pick_ack_phrase(prompt: &str) -> &'static str {
 /// turn actually ran, `Ok(false)` when the inbound buffer was below the
 /// floor.
 ///
-/// This overload uses the default (tinyhumans) providers.
+/// This overload loads the configured providers (via `load_providers`),
+/// falling back to tinyhumans when no config is available.
 pub async fn run_turn(request_id: &str) -> Result<bool, String> {
-    let (stt, llm, tts) = factory::create_default_providers();
+    let (stt, llm, tts) = load_providers().await;
     run_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
+}
+
+/// Load providers from the on-disk config when possible. Falls back to
+/// the default (tinyhumans) provider set when config loading fails — that
+/// keeps the test / no-network path working without requiring an
+/// `~/.openhuman/config.toml` to exist.
+async fn load_providers() -> (
+    Box<dyn SpeechToText>,
+    Box<dyn MeetingLLM>,
+    Box<dyn TextToSpeech>,
+) {
+    match crate::openhuman::config::ops::load_config_with_timeout().await {
+        Ok(config) => factory::create_providers_from_config(&config.meet.meet_agent),
+        Err(err) => {
+            log::debug!(
+                "[meet-agent] config load failed ({err}), using default providers"
+            );
+            factory::create_default_providers()
+        }
+    }
 }
 
 /// Fire one brain turn with explicit providers. See [`run_turn`].
