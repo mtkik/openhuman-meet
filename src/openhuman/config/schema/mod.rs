@@ -55,7 +55,7 @@ pub use heartbeat_cron::{CronConfig, HeartbeatConfig};
 pub use identity_cost::{CostConfig, ModelPricing};
 pub use learning::{LearningConfig, ReflectionSource};
 pub use local_ai::{LocalAiConfig, LocalAiUsage};
-pub use meet::MeetConfig;
+pub use meet::{MeetAgentConfig, MeetConfig, ProviderConfig};
 pub use node::NodeConfig;
 pub use observability::ObservabilityConfig;
 pub use proxy::{

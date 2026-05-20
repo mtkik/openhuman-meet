@@ -6,19 +6,30 @@
 //! the inbound buffer and runs three serial stages:
 //!
 //! 1. **STT** — wrap the PCM16LE samples in a WAV container and post
-//!    to [`crate::openhuman::voice::cloud_transcribe`]. Returns the
+//!    to the configured STT provider (default: tinyhumans backend via
+//!    [`crate::openhuman::voice::cloud_transcribe`]). Returns the
 //!    transcribed text (or `Err` on transport / auth failure).
 //!
-//! 2. **LLM** — send a tiny chat-completions request through
-//!    [`crate::api::BackendOAuthClient`] with a "live meeting agent"
+//! 2. **LLM** — send a tiny chat-completions request to the configured
+//!    LLM provider (default: tinyhumans backend via
+//!    [`crate::api::BackendOAuthClient`]) with a "live meeting agent"
 //!    system prompt and the transcript as the user message. Returns a
 //!    short reply (or empty string when the agent decides to stay
 //!    silent).
 //!
-//! 3. **TTS** — feed the reply text into
-//!    [`crate::openhuman::voice::reply_speech`] requesting
+//! 3. **TTS** — feed the reply text to the configured TTS provider
+//!    (default: tinyhumans backend via
+//!    [`crate::openhuman::voice::reply_speech`]) requesting
 //!    `output_format = "pcm_16000"`. Decode the base64 PCM bytes back
 //!    into `Vec<i16>` and enqueue on the session's outbound queue.
+//!
+//! ## Provider Trait Architecture
+//!
+//! Providers implement [`super::providers::SpeechToText`],
+//! [`super::providers::MeetingLLM`], and [`super::providers::TextToSpeech`].
+//! The default set (tinyhumans backend) preserves exact backward
+//! compatibility. Use [`super::providers::factory::create_providers_from_config`]
+//! to select providers from the `[meet.meet_agent]` config section.
 //!
 //! ## Fallback
 //!
@@ -30,12 +41,12 @@
 //! `Note` events so a real-call failure is visible in the transcript
 //! log, not silently degraded to a stub.
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 
+use super::providers::factory;
+use super::providers::{MeetingLLM, SpeechToText, TextToSpeech};
 use super::session::registry;
 use super::types::{SessionEvent, SessionEventKind};
-use super::wav;
 
 /// How many of the most recent `Heard` / `Spoke` events we feed back
 /// into the LLM as rolling conversation context. 12 ≈ a few minutes of
@@ -46,10 +57,6 @@ const CONTEXT_EVENT_WINDOW: usize = 12;
 /// tokens ≈ 30 seconds of speech — long enough for a real answer, short
 /// enough that the model can't hijack the meeting.
 const REPLY_MAX_TOKENS: u32 = 220;
-/// ElevenLabs model. `eleven_turbo_v2_5` strikes the best
-/// quality/latency balance; the older default the backend would pick
-/// (`eleven_monolingual_v1`) sounds noticeably flatter.
-const TTS_MODEL_ID: &str = "eleven_turbo_v2_5";
 
 /// Minimum samples below which we skip the brain turn entirely.
 /// 250 ms @ 16 kHz — under this, VAD almost certainly fired on a
@@ -66,12 +73,26 @@ const SAMPLE_RATE_HZ: u32 = super::ops::REQUIRED_SAMPLE_RATE;
 /// outbound. Skips STT entirely — the captions are already text.
 ///
 /// We give the user a short window (`CAPTION_TURN_DELAY_MS`) after the
-/// wake word fires so multi-caption utterances ("hey openhuman …
-/// what's the weather like in paris") have a chance to assemble
+/// wake word fires so multi-caption utterances (\"hey openhuman …
+/// what's the weather like in paris\") have a chance to assemble
 /// before we hit the LLM. The shell calls this on every caption
 /// push that flagged the wake word; subsequent calls before the
 /// delay expires are coalesced via the session's `wake_active` flag.
+///
+/// This overload loads the configured providers (via `load_providers`),
+/// falling back to tinyhumans when no config is available.
 pub async fn run_caption_turn(request_id: &str) -> Result<bool, String> {
+    let (stt, llm, tts) = load_providers().await;
+    run_caption_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
+}
+
+/// Caption-driven turn with explicit providers. See [`run_caption_turn`].
+pub async fn run_caption_turn_with_providers(
+    request_id: &str,
+    _stt: &dyn SpeechToText,
+    llm: &dyn MeetingLLM,
+    tts: &dyn TextToSpeech,
+) -> Result<bool, String> {
     // Wait briefly so a multi-fragment wake utterance ("hey openhuman
     // what's the weather like in paris" arriving as 2-3 captions) has
     // a chance to assemble before we drain the prompt.
@@ -96,7 +117,10 @@ pub async fn run_caption_turn(request_id: &str) -> Result<bool, String> {
     // to say, and how concise to be. It can also return an empty
     // string when it concludes the message wasn't actually directed
     // at it (false-positive wake word, side conversation).
-    let reply_text = match llm_meeting(&prompt, &history).await {
+    let reply_text = match llm
+        .reply(&prompt, &history, MEETING_SYSTEM_PROMPT, REPLY_MAX_TOKENS)
+        .await
+    {
         Ok(text) => text,
         Err(err) => {
             log::warn!("[meet-agent] caption-turn LLM failed request_id={request_id} err={err}");
@@ -113,7 +137,7 @@ pub async fn run_caption_turn(request_id: &str) -> Result<bool, String> {
     let synthesized = if reply_text.trim().is_empty() {
         Vec::new()
     } else {
-        match tts(&reply_text).await {
+        match tts.synthesize(&reply_text, SAMPLE_RATE_HZ).await {
             Ok(samples) => samples,
             Err(err) => {
                 log::warn!(
@@ -177,7 +201,41 @@ fn pick_ack_phrase(prompt: &str) -> &'static str {
 /// Fire one brain turn for the named session. Returns `Ok(true)` when a
 /// turn actually ran, `Ok(false)` when the inbound buffer was below the
 /// floor.
+///
+/// This overload loads the configured providers (via `load_providers`),
+/// falling back to tinyhumans when no config is available.
 pub async fn run_turn(request_id: &str) -> Result<bool, String> {
+    let (stt, llm, tts) = load_providers().await;
+    run_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
+}
+
+/// Load providers from the on-disk config when possible. Falls back to
+/// the default (tinyhumans) provider set when config loading fails — that
+/// keeps the test / no-network path working without requiring an
+/// `~/.openhuman/config.toml` to exist.
+async fn load_providers() -> (
+    Box<dyn SpeechToText>,
+    Box<dyn MeetingLLM>,
+    Box<dyn TextToSpeech>,
+) {
+    match crate::openhuman::config::ops::load_config_with_timeout().await {
+        Ok(config) => factory::create_providers_from_config(&config.meet.meet_agent),
+        Err(err) => {
+            log::debug!(
+                "[meet-agent] config load failed ({err}), using default providers"
+            );
+            factory::create_default_providers()
+        }
+    }
+}
+
+/// Fire one brain turn with explicit providers. See [`run_turn`].
+pub async fn run_turn_with_providers(
+    request_id: &str,
+    stt: &dyn SpeechToText,
+    llm: &dyn MeetingLLM,
+    tts: &dyn TextToSpeech,
+) -> Result<bool, String> {
     let (drained, history) = registry().with_session(request_id, |s| {
         let drained = s.drain_inbound();
         let history = recent_dialog_history(s.events(), CONTEXT_EVENT_WINDOW);
@@ -197,7 +255,7 @@ pub async fn run_turn(request_id: &str) -> Result<bool, String> {
     );
 
     // ─── STT ────────────────────────────────────────────────────────
-    let heard = match stt(&drained).await {
+    let heard = match stt.transcribe(&drained, SAMPLE_RATE_HZ).await {
         Ok(text) if text.trim().is_empty() => {
             log::info!("[meet-agent] STT empty, skipping turn request_id={request_id}");
             return Ok(false);
@@ -222,7 +280,10 @@ pub async fn run_turn(request_id: &str) -> Result<bool, String> {
     );
 
     // ─── LLM ────────────────────────────────────────────────────────
-    let reply_text = match llm_meeting(&heard, &history).await {
+    let reply_text = match llm
+        .reply(&heard, &history, MEETING_SYSTEM_PROMPT, REPLY_MAX_TOKENS)
+        .await
+    {
         Ok(text) => text,
         Err(err) => {
             log::warn!("[meet-agent] LLM failed request_id={request_id} err={err}");
@@ -240,7 +301,7 @@ pub async fn run_turn(request_id: &str) -> Result<bool, String> {
     let synthesized = if reply_text.trim().is_empty() {
         Vec::new()
     } else {
-        match tts(&reply_text).await {
+        match tts.synthesize(&reply_text, SAMPLE_RATE_HZ).await {
             Ok(samples) => samples,
             Err(err) => {
                 log::warn!("[meet-agent] TTS failed request_id={request_id} err={err}");
@@ -279,23 +340,7 @@ pub async fn run_turn(request_id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-// ─── Real adapters ──────────────────────────────────────────────────
-
-async fn stt(samples: &[i16]) -> Result<String, String> {
-    use crate::openhuman::voice::cloud_transcribe::{transcribe_cloud, CloudTranscribeOptions};
-
-    let config = crate::openhuman::config::ops::load_config_with_timeout().await?;
-    let wav_bytes = wav::pack_pcm16le_mono_wav(samples, SAMPLE_RATE_HZ);
-    let audio_b64 = B64.encode(&wav_bytes);
-    let opts = CloudTranscribeOptions {
-        mime_type: Some("audio/wav".to_string()),
-        file_name: Some("meet-agent.wav".to_string()),
-        ..Default::default()
-    };
-    let outcome = transcribe_cloud(&config, &audio_b64, &opts).await?;
-    let text = outcome.value.text.clone();
-    Ok(text)
-}
+// ─── System prompt ──────────────────────────────────────────────────
 
 /// System prompt for the live meeting agent. Pushes the model toward
 /// (a) recognising whether the latest utterance is genuinely directed
@@ -315,7 +360,7 @@ remind, draft). Weak signals (do NOT respond): chit-chat between humans, \
 side conversation, your name appearing inside a longer thought aimed at someone \
 else, ambient transcription noise.\n\
 \n\
-If it is NOT directed at you, output exactly the empty string. Stay silent. \
+If it is NOT directed at you, output exactly the empty string. Stay silent. \n\
 \n\
 If it IS directed at you:\n\
   • Reply in 1–2 spoken sentences. Conversational, warm, direct. No filler.\n\
@@ -330,92 +375,9 @@ in one sentence rather than guessing.\n\
 just do it.\n\
 ";
 
-/// Build a chat-completions request from rolling meeting history plus
-/// the current user prompt, post it through the backend, and return
-/// the assistant's reply (trimmed, possibly empty).
-async fn llm_meeting(prompt: &str, history: &[ConversationTurn]) -> Result<String, String> {
-    use crate::api::config::effective_backend_api_url;
-    use crate::api::jwt::get_session_token;
-    use crate::api::BackendOAuthClient;
-    use reqwest::Method;
+// ─── History helpers ────────────────────────────────────────────────
 
-    let config = crate::openhuman::config::ops::load_config_with_timeout().await?;
-    let token = get_session_token(&config)
-        .map_err(|e| e.to_string())?
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| "no backend session token".to_string())?;
-
-    let api_url = effective_backend_api_url(&config.api_url);
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-
-    let mut messages: Vec<Value> = Vec::with_capacity(history.len() + 2);
-    messages.push(json!({ "role": "system", "content": MEETING_SYSTEM_PROMPT }));
-    for turn in history {
-        messages.push(json!({ "role": turn.role, "content": turn.content }));
-    }
-    messages.push(json!({ "role": "user", "content": prompt }));
-
-    let body = json!({
-        "model": "agentic-v1",
-        "temperature": 0.5,
-        "max_tokens": REPLY_MAX_TOKENS,
-        "messages": messages,
-    });
-
-    let raw = client
-        .authed_json(
-            &token,
-            Method::POST,
-            "/openai/v1/chat/completions",
-            Some(body),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let text = extract_chat_completion_text(&raw)
-        .ok_or_else(|| format!("unexpected chat completions response: {raw}"))?;
-    Ok(strip_for_speech(&text))
-}
-
-/// Trim characters that sound bad when read aloud by TTS but routinely
-/// leak from a chat-completions response (markdown asterisks, fenced
-/// code, leading bullets). Keep punctuation that affects prosody
-/// (commas, periods, question marks) intact.
-fn strip_for_speech(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_code = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            continue;
-        }
-        let cleaned: String = trimmed
-            .trim_start_matches(|c: char| c == '-' || c == '*' || c == '#' || c == '>')
-            .trim()
-            .chars()
-            .filter(|c| !matches!(c, '*' | '`' | '_' | '#'))
-            .collect();
-        if cleaned.is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(&cleaned);
-    }
-    out.trim().to_string()
-}
-
-/// One rolling-history entry handed to the LLM.
-#[derive(Debug, Clone)]
-struct ConversationTurn {
-    role: &'static str,
-    content: String,
-}
+use super::providers::ConversationTurn;
 
 /// Pull the last `window` `Heard`/`Spoke` events from the session log
 /// and shape them into chat-completions turns. `Note` events are
@@ -436,63 +398,12 @@ fn recent_dialog_history(events: &[SessionEvent], window: usize) -> Vec<Conversa
             continue;
         }
         out.push(ConversationTurn {
-            role,
+            role: role.to_string(),
             content: content.to_string(),
         });
     }
     out.reverse();
     out
-}
-
-async fn tts(text: &str) -> Result<Vec<i16>, String> {
-    use crate::openhuman::voice::reply_speech::{synthesize_reply, ReplySpeechOptions};
-
-    let config = crate::openhuman::config::ops::load_config_with_timeout().await?;
-    // Tuned for live conversational speech, not narration:
-    //   stability 0.4 — leave room for prosody / inflection. Higher
-    //     values (>0.6) flatten the read into the "monotone audiobook"
-    //     timbre the previous default produced.
-    //   similarity_boost 0.75 — keep the chosen voice's character.
-    //   style 0.35 — light expressiveness; too high makes punctuation
-    //     swallow words.
-    //   use_speaker_boost on — louder, clearer in noisy meetings.
-    let voice_settings = json!({
-        "stability": 0.4,
-        "similarity_boost": 0.75,
-        "style": 0.35,
-        "use_speaker_boost": true,
-    });
-    let opts = ReplySpeechOptions {
-        // Ask ElevenLabs (via the hosted backend) for raw PCM16LE @
-        // 16 kHz so we can feed the result straight into the
-        // shell-side bridge with no transcoding.
-        output_format: Some("pcm_16000".to_string()),
-        model_id: Some(TTS_MODEL_ID.to_string()),
-        voice_settings: Some(voice_settings),
-        ..Default::default()
-    };
-    let outcome = synthesize_reply(&config, text, &opts).await?;
-    let result = outcome.value;
-    let pcm_bytes = B64
-        .decode(result.audio_base64.as_bytes())
-        .map_err(|e| format!("decode tts base64: {e}"))?;
-    if !pcm_bytes.len().is_multiple_of(2) {
-        return Err(format!("odd byte length from tts: {}", pcm_bytes.len()));
-    }
-    Ok(pcm_bytes
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-        .collect())
-}
-
-fn extract_chat_completion_text(raw: &Value) -> Option<String> {
-    raw.get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|first| first.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|s| s.as_str())
-        .map(|s| s.trim().to_string())
 }
 
 // ─── Stubs (fallback for tests / no-backend) ────────────────────────
@@ -572,16 +483,19 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_chat_completion_text(&raw),
+            super::super::providers::extract_chat_completion_text(&raw),
             Some("hello world".to_string())
         );
     }
 
     #[test]
     fn extract_chat_completion_text_returns_none_on_malformed() {
-        assert_eq!(extract_chat_completion_text(&json!({})), None);
         assert_eq!(
-            extract_chat_completion_text(&json!({ "choices": [] })),
+            super::super::providers::extract_chat_completion_text(&json!({})),
+            None
+        );
+        assert_eq!(
+            super::super::providers::extract_chat_completion_text(&json!({ "choices": [] })),
             None
         );
     }
@@ -636,6 +550,7 @@ mod tests {
 
     #[test]
     fn strip_for_speech_removes_markdown_punctuation_and_fences() {
+        use super::super::providers::tinyhumans::strip_for_speech;
         let raw = "**Got it.** Adding `that` to your follow-ups.";
         assert_eq!(
             strip_for_speech(raw),
@@ -649,6 +564,7 @@ mod tests {
 
     #[test]
     fn strip_for_speech_preserves_empty_when_input_empty() {
+        use super::super::providers::tinyhumans::strip_for_speech;
         assert_eq!(strip_for_speech(""), "");
         assert_eq!(strip_for_speech("   \n  "), "");
     }
