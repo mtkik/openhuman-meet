@@ -406,7 +406,7 @@ pub fn all_tools_with_runtime(
     // ── Agent integration tools (backend-proxied) ─────────────────
     if let Some(client) = crate::openhuman::integrations::build_client(root_config) {
         tracing::debug!("[integrations] client built successfully");
-        if root_config.integrations.apify.enabled {
+        if root_config.integrations.apify.is_active() {
             tools.push(Box::new(
                 crate::openhuman::integrations::ApifyRunActorTool::new(Arc::clone(&client)),
             ));
@@ -420,7 +420,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] apify disabled — skipping");
         }
-        if root_config.integrations.google_places.enabled {
+        if root_config.integrations.google_places.is_active() {
             tools.push(Box::new(
                 crate::openhuman::integrations::GooglePlacesSearchTool::new(Arc::clone(&client)),
             ));
@@ -431,7 +431,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] google_places disabled — skipping");
         }
-        if root_config.integrations.parallel.enabled {
+        if root_config.integrations.parallel.is_active() {
             tools.push(Box::new(
                 crate::openhuman::integrations::ParallelSearchTool::new(Arc::clone(&client)),
             ));
@@ -454,7 +454,21 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] parallel disabled — skipping");
         }
-        if root_config.integrations.stock_prices.enabled {
+        if root_config.integrations.tinyfish.is_active() {
+            tools.push(Box::new(
+                crate::openhuman::integrations::TinyFishSearchTool::new(Arc::clone(&client)),
+            ));
+            tools.push(Box::new(
+                crate::openhuman::integrations::TinyFishFetchTool::new(Arc::clone(&client)),
+            ));
+            tools.push(Box::new(
+                crate::openhuman::integrations::TinyFishAgentRunTool::new(Arc::clone(&client)),
+            ));
+            tracing::debug!("[integrations] registered tinyfish tools");
+        } else {
+            tracing::debug!("[integrations] tinyfish disabled — skipping");
+        }
+        if root_config.integrations.stock_prices.is_active() {
             tools.push(Box::new(
                 crate::openhuman::integrations::StockQuoteTool::new(Arc::clone(&client)),
             ));
@@ -474,7 +488,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] stock_prices disabled — skipping");
         }
-        if root_config.integrations.twilio.enabled {
+        if root_config.integrations.twilio.is_active() {
             tools.push(Box::new(
                 crate::openhuman::integrations::TwilioCallTool::new(Arc::clone(&client)),
             ));

@@ -258,6 +258,7 @@ Canonical mapping of every product feature to its test source(s). Drives gap-fil
 | ----- | -------------------- | ----- | ----------------------------------- | ------ | ------------------ |
 | 7.2.1 | HTTP / API Requests  | RU+WD | `service-connectivity-flow.spec.ts` | ✅     |                    |
 | 7.2.2 | Web Search Execution | WD    | `skill-execution-flow.spec.ts`      | 🟡     | Generic skill path |
+| 7.2.3 | TinyFish Integration Tools | RU | `src/openhuman/integrations/tinyfish_tests.rs`, `src/openhuman/tools/ops_tests.rs::all_tools_executes_tinyfish_family_against_fake_backend` | ✅ | Backend-proxied Search, Fetch, and Agent run tools covered with fake backend |
 
 ---
 
@@ -485,7 +486,7 @@ Canonical mapping of every product feature to its test source(s). Drives gap-fil
 | 🟡 Partial       | 27                                               |
 | ❌ Missing       | 26                                               |
 | 🚫 Manual smoke  | 11                                               |
-| **Total leaves** | **130 explicit + nested = 201 product features** |
+| **Total leaves** | **131 explicit + nested = 202 product features** |
 
 PR-A delta: 13 leaves moved from ❌ → ✅ via 5 WDIO specs + 2 Vitest + 1 Rust integration test.
 Remaining gaps tracked under sub-issues #965 (process), #966 (docs), #967 (tools), #968 (auth/perm), #969 (settings), #970 (rewards), #971 (manual smoke).
