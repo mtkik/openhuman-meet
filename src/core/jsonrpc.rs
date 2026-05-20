@@ -636,7 +636,34 @@ fn with_cors_headers(mut response: Response) -> Response {
 
 /// Handler for the health check endpoint.
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({ "ok": true })))
+    let snapshot = crate::openhuman::health::snapshot();
+    let unhealthy: Vec<&str> = snapshot
+        .components
+        .iter()
+        .filter_map(|(name, c)| {
+            if c.status == "ok" || c.status == "starting" {
+                None
+            } else {
+                Some(name.as_str())
+            }
+        })
+        .collect();
+    let is_ok = unhealthy.is_empty();
+
+    let status = if is_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    tracing::debug!(
+        "[health] status={} components={} unhealthy={:?}",
+        status.as_u16(),
+        snapshot.components.len(),
+        unhealthy
+    );
+
+    (status, Json(snapshot))
 }
 
 /// Handler for the schema discovery endpoint.
