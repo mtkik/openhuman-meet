@@ -237,6 +237,10 @@ fn build_registered_controllers() -> Vec<RegisteredController> {
     controllers.extend(crate::openhuman::meet::all_meet_registered_controllers());
     // Live meet-agent loop: STT/LLM/TTS over the open call's audio.
     controllers.extend(crate::openhuman::meet_agent::all_meet_agent_registered_controllers());
+    // Headless Meet runner — Playwright-style chromium + join flow + caption watch.
+    controllers.extend(
+        crate::openhuman::meet_headless::all_meet_headless_registered_controllers(),
+    );
     // Desktop companion — Clicky-style interaction loop.
     controllers.extend(
         crate::openhuman::desktop_companion::all_desktop_companion_registered_controllers(),
@@ -337,6 +341,8 @@ fn build_declared_controller_schemas() -> Vec<ControllerSchema> {
     schemas.extend(crate::openhuman::meet::all_meet_controller_schemas());
     // Live meet-agent listening + speaking loop
     schemas.extend(crate::openhuman::meet_agent::all_meet_agent_controller_schemas());
+    // Headless Meet runner — Playwright-style chromium + join flow + caption watch.
+    schemas.extend(crate::openhuman::meet_headless::all_meet_headless_controller_schemas());
     // Desktop companion — Clicky-style interaction loop.
     schemas.extend(crate::openhuman::desktop_companion::all_desktop_companion_controller_schemas());
     // Structured WhatsApp Web data — local SQLite store, agent-queryable
@@ -446,6 +452,10 @@ pub fn namespace_description(namespace: &str) -> Option<&'static str> {
         "meet_agent" => Some(
             "Live agent loop for an open Google Meet call: shell streams inbound PCM, \
              core runs VAD-segmented STT → LLM → TTS, shell pulls synthesized PCM back.",
+        ),
+        "meet_headless" => Some(
+            "Headless Meet runner: launch chromium, join the call as a guest, and \
+             watch Meet's live captions — no Tauri desktop app required.",
         ),
         "whatsapp_data" => Some(
             "Structured WhatsApp conversation and message store — list chats, read messages, and search across WhatsApp Web data.",
