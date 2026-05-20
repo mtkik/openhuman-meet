@@ -627,6 +627,11 @@ const ALLOWED_ORIGINS_ENV: &str = "OPENHUMAN_CORE_ALLOWED_ORIGINS";
 /// loaded in a CEF child webview) must be refused — the bearer token alone
 /// is not enough authorization without an origin binding.
 pub(super) fn is_origin_allowed(origin: &str) -> bool {
+    let extra_origins = std::env::var(ALLOWED_ORIGINS_ENV).ok();
+    is_origin_allowed_with_extra(origin, extra_origins.as_deref())
+}
+
+pub(super) fn is_origin_allowed_with_extra(origin: &str, extra_origins: Option<&str>) -> bool {
     // Tauri v2 webview origins. Windows uses an HTTP(S) custom host; macOS
     // and Linux use the `tauri://` scheme. We accept both for portability.
     if matches!(
@@ -651,7 +656,7 @@ pub(super) fn is_origin_allowed(origin: &str) -> bool {
     }
 
     // Env override: comma-separated exact matches.
-    if let Ok(extra) = std::env::var(ALLOWED_ORIGINS_ENV) {
+    if let Some(extra) = extra_origins {
         for candidate in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             if candidate == origin {
                 return true;
@@ -691,7 +696,7 @@ async fn cors_middleware(req: Request, next: Next) -> Response {
 /// the calling JS. Non-browser callers (no `Origin` header) are unaffected.
 pub(super) fn with_cors_headers(mut response: Response, origin: Option<&str>) -> Response {
     let headers = response.headers_mut();
-    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    headers.append(header::VARY, HeaderValue::from_static("Origin"));
 
     if let Some(o) = origin {
         if is_origin_allowed(o) {
