@@ -18,18 +18,41 @@
 - [x] mod.rs 更新 — モジュール登録
 - [x] cargo check 通過確認
 
-### 🔲 Phase 3: ビルド検証
-- [ ] `cargo check` 通過確認
-- [ ] 既存テスト通過確認
-- [ ] 新規プロバイダーのユニットテスト
+### ✅ Phase 3: ビルド検証（完了）
+- [x] `cargo check --lib` 通過（既存warningのみ、新規エラーなし）
+- [x] `cargo test -p openhuman --lib providers` — 902テスト通過
+- [x] 新規プロバイダーのユニットテスト38個追加（wiremock）
 
-### 🔲 Phase 4: OpenClaw Skill化
-- [ ] SKILL.md作成
-- [ ] Helper CLI作成
-- [ ] JSON-RPC連携スクリプト
+### ✅ Phase 4: OpenClaw Skill化（完了）
+- [x] SKILL.md作成（9KB、YAML frontmatter付き）
+- [x] Helper CLI 4本: meet-join, meet-status, meet-leave, meet-transcript
+- [x] JSON-RPC連携スクリプト
+- [x] data/default-config.toml（デフォルト設定）
 
-### 🔲 Phase 5: レビュー
-- [ ] Codexによる全コードレビュー
+### ✅ Phase 5: レビュー＆修正（完了）
+- [x] Claude Code レビュー — 8件指摘（P0×2, P1×5, P2×2）→全修正
+- [x] Codex (gpt-5.5) レビュー — 3件指摘（P1×1, P2×2）→全修正
+- [x] Codex PR レビュー — P2×2件（drain順序）
+- [x] PR #1 作成 → squash merge 済み (a365e70)
+
+### ✅ レビュー指摘修正（完了）
+- [x] P0: brain.rs に config→factory 配線（load_providers helper）
+- [x] P0: APIキー URL→X-goog-api-key ヘッダー変更
+- [x] P1: STT デフォルトモデル chirp_2→latest_long
+- [x] P1: HTTP 20s タイムアウト追加
+- [x] P1: TTS WAV ヘッダースキップ
+- [x] P1: base_url フィールド追加（Google STT/TTS）
+- [x] P2: strip_for_speech import パス整理
+- [x] P2: extract_chat_completion_text 共通化（mod.rs）
+
+### 🔄 P2 修正（進行中）
+- [ ] run_turn: drain → provider load 順序修正
+- [ ] run_caption_turn: prompt drain → provider load 順序修正
+
+### 🔲 Phase 6: ヘッドレス対応（別途検討）
+- [ ] Shell（CEF）なしでCore + PlaywrightでMeet参加
+- [ ] brain.rs + Shell側の変更が必要
+- [ ] 大規模変更のため別ブランチ・別PRで対応
 
 ---
 
