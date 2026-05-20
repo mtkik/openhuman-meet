@@ -464,6 +464,16 @@ fn is_provider_user_state_message(lower: &str) -> bool {
         return true;
     }
 
+    // OPENHUMAN-TAURI-S7: provider policy rejection on Kimi's coding
+    // endpoint when requests are not sent from an approved coding-agent
+    // client. Canonical body contains `access_terminated_error` and:
+    // "currently only available for Coding Agents ...".
+    if lower.contains("access_terminated_error")
+        || lower.contains("currently only available for coding agents")
+    {
+        return true;
+    }
+
     false
 }
 
@@ -1611,6 +1621,23 @@ mod tests {
         // the gmail prefix).
         assert_eq!(
             expected_error_kind("HTTP 403: Request had insufficient authentication scopes."),
+            Some(ExpectedErrorKind::ProviderUserState)
+        );
+    }
+
+    #[test]
+    fn classifies_access_terminated_provider_policy_as_provider_user_state() {
+        assert_eq!(
+            expected_error_kind(
+                "custom_openai API error (403 Forbidden): {\"error\":{\"message\":\"Kimi For Coding is currently only available for Coding Agents such as Kimi CLI, Claude Code, Roo Code, Kilo Code, etc.\",\"type\":\"access_terminated_error\"}}"
+            ),
+            Some(ExpectedErrorKind::ProviderUserState)
+        );
+
+        assert_eq!(
+            expected_error_kind(
+                "agent turn failed: custom_openai API error (403): currently only available for coding agents"
+            ),
             Some(ExpectedErrorKind::ProviderUserState)
         );
     }

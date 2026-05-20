@@ -472,6 +472,13 @@ impl OpenAiCompatibleProvider {
                     Some(model),
                     status,
                 );
+            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
+                super::log_provider_access_policy_denied_http_403(
+                    "responses_api",
+                    self.name.as_str(),
+                    Some(model),
+                    status,
+                );
             } else if super::should_report_provider_http_failure(status) {
                 crate::core::observability::report_error(
                     message.as_str(),
@@ -815,6 +822,13 @@ impl OpenAiCompatibleProvider {
             );
             if super::is_budget_exhausted_http_400(status, &body) {
                 super::log_budget_exhausted_http_400(
+                    "streaming_chat",
+                    self.name.as_str(),
+                    Some(native_request.model.as_str()),
+                    status,
+                );
+            } else if super::is_provider_access_policy_denied_http_403(status, &body) {
+                super::log_provider_access_policy_denied_http_403(
                     "streaming_chat",
                     self.name.as_str(),
                     Some(native_request.model.as_str()),
@@ -1294,6 +1308,13 @@ impl Provider for OpenAiCompatibleProvider {
                     Some(model),
                     status,
                 );
+            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
+                super::log_provider_access_policy_denied_http_403(
+                    "chat_completions",
+                    self.name.as_str(),
+                    Some(model),
+                    status,
+                );
             } else if super::should_report_provider_http_failure(status) {
                 crate::core::observability::report_error(
                     message.as_str(),
@@ -1725,6 +1746,13 @@ impl Provider for OpenAiCompatibleProvider {
                     Some(model),
                     status,
                 );
+            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
+                super::log_provider_access_policy_denied_http_403(
+                    "native_chat",
+                    self.name.as_str(),
+                    Some(model),
+                    status,
+                );
             } else if super::should_report_provider_http_failure(status) {
                 crate::core::observability::report_error(
                     message.as_str(),
@@ -1857,6 +1885,13 @@ impl Provider for OpenAiCompatibleProvider {
                 let message = format!("{}: {}", status, sanitized_error);
                 if super::is_budget_exhausted_http_400(status, &raw_error) {
                     super::log_budget_exhausted_http_400(
+                        "stream_chat",
+                        provider_name.as_str(),
+                        Some(model_owned.as_str()),
+                        status,
+                    );
+                } else if super::is_provider_access_policy_denied_http_403(status, &raw_error) {
+                    super::log_provider_access_policy_denied_http_403(
                         "stream_chat",
                         provider_name.as_str(),
                         Some(model_owned.as_str()),
