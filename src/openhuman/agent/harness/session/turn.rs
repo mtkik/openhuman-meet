@@ -27,6 +27,7 @@ use crate::openhuman::agent::memory_loader::collect_recall_citations;
 use crate::openhuman::agent::progress::AgentProgress;
 use crate::openhuman::context::prompt::{LearnedContextData, PromptContext, PromptTool};
 use crate::openhuman::context::{ReductionOutcome, ARCHIVIST_EXTRACTION_PROMPT};
+use crate::openhuman::inference::model_context::context_window_for_model;
 use crate::openhuman::inference::provider::{
     ChatMessage, ChatRequest, ConversationMessage, ProviderDelta,
 };
@@ -34,6 +35,10 @@ use crate::openhuman::memory::MemoryCategory;
 use crate::openhuman::tools::traits::ToolCallOptions;
 use crate::openhuman::tools::Tool;
 use crate::openhuman::util::truncate_with_ellipsis;
+
+use crate::openhuman::agent::harness::token_budget::{
+    trim_chat_messages_to_budget, trim_conversation_history_to_budget,
+};
 use anyhow::Result;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -489,6 +494,21 @@ impl Agent {
                     self.history.len()
                 );
 
+                if let Some(context_window) = context_window_for_model(&effective_model) {
+                    let budget_outcome =
+                        trim_conversation_history_to_budget(&mut self.history, context_window);
+                    if budget_outcome.trimmed {
+                        log::warn!(
+                            "[agent_loop] pre-dispatch history trimmed model={} context_window={} original_tokens={} final_tokens={} messages_removed={}",
+                            effective_model,
+                            context_window,
+                            budget_outcome.original_tokens,
+                            budget_outcome.final_tokens,
+                            budget_outcome.messages_removed
+                        );
+                    }
+                }
+
                 // Global context management: run the reduction chain
                 // before every provider hit. Cheap when the guard is
                 // healthy; executes the summarizer LLM call
@@ -558,7 +578,8 @@ impl Agent {
                 // a resumed session to provide a byte-identical prefix for
                 // KV cache reuse. After `.take()` the cache is consumed;
                 // subsequent iterations rebuild from history normally.
-                let messages = if let Some(mut cached) = self.cached_transcript_messages.take() {
+                let mut messages = if let Some(mut cached) = self.cached_transcript_messages.take()
+                {
                     // Append only the delta (new user message) from the
                     // end of the current history.
                     let new_tail = self.tool_dispatcher.to_provider_messages(
@@ -574,6 +595,21 @@ impl Agent {
                 } else {
                     self.tool_dispatcher.to_provider_messages(&self.history)
                 };
+                if let Some(context_window) = context_window_for_model(&effective_model) {
+                    let budget_outcome =
+                        trim_chat_messages_to_budget(&mut messages, context_window);
+                    if budget_outcome.trimmed {
+                        log::warn!(
+                            "[agent_loop] pre-dispatch provider messages trimmed model={} context_window={} original_tokens={} final_tokens={} messages_removed={}",
+                            effective_model,
+                            context_window,
+                            budget_outcome.original_tokens,
+                            budget_outcome.final_tokens,
+                            budget_outcome.messages_removed
+                        );
+                    }
+                }
+
                 last_provider_messages = Some(messages.clone());
 
                 log::info!(
