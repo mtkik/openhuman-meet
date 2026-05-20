@@ -79,20 +79,10 @@ const SAMPLE_RATE_HZ: u32 = super::ops::REQUIRED_SAMPLE_RATE;
 /// push that flagged the wake word; subsequent calls before the
 /// delay expires are coalesced via the session's `wake_active` flag.
 ///
-/// This overload loads the configured providers (via `load_providers`),
-/// falling back to tinyhumans when no config is available.
+/// This overload drains the pending prompt BEFORE loading providers, so a
+/// stalled config load can't let additional caption fragments accumulate
+/// into the same turn.
 pub async fn run_caption_turn(request_id: &str) -> Result<bool, String> {
-    let (stt, llm, tts) = load_providers().await;
-    run_caption_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
-}
-
-/// Caption-driven turn with explicit providers. See [`run_caption_turn`].
-pub async fn run_caption_turn_with_providers(
-    request_id: &str,
-    _stt: &dyn SpeechToText,
-    llm: &dyn MeetingLLM,
-    tts: &dyn TextToSpeech,
-) -> Result<bool, String> {
     // Wait briefly so a multi-fragment wake utterance ("hey openhuman
     // what's the weather like in paris" arriving as 2-3 captions) has
     // a chance to assemble before we drain the prompt.
@@ -106,6 +96,42 @@ pub async fn run_caption_turn_with_providers(
         (Some(p), h) => (p, h),
         (None, _) => return Ok(false),
     };
+
+    // Load providers AFTER the prompt is captured. If config loading
+    // stalls, no additional caption fragments can land in this turn.
+    let (stt, llm, tts) = load_providers().await;
+    run_caption_turn_inner(request_id, prompt, history, &*stt, &*llm, &*tts).await
+}
+
+/// Caption-driven turn with explicit providers. See [`run_caption_turn`].
+pub async fn run_caption_turn_with_providers(
+    request_id: &str,
+    stt: &dyn SpeechToText,
+    llm: &dyn MeetingLLM,
+    tts: &dyn TextToSpeech,
+) -> Result<bool, String> {
+    tokio::time::sleep(std::time::Duration::from_millis(CAPTION_TURN_DELAY_MS)).await;
+
+    let (prompt, history) = match registry().with_session(request_id, |s| {
+        let prompt = s.take_pending_prompt();
+        let history = recent_dialog_history(s.events(), CONTEXT_EVENT_WINDOW);
+        (prompt, history)
+    })? {
+        (Some(p), h) => (p, h),
+        (None, _) => return Ok(false),
+    };
+
+    run_caption_turn_inner(request_id, prompt, history, stt, llm, tts).await
+}
+
+async fn run_caption_turn_inner(
+    request_id: &str,
+    prompt: String,
+    history: Vec<ConversationTurn>,
+    _stt: &dyn SpeechToText,
+    llm: &dyn MeetingLLM,
+    tts: &dyn TextToSpeech,
+) -> Result<bool, String> {
     log::info!(
         "[meet-agent] caption turn start request_id={request_id} prompt_chars={} history_msgs={}",
         prompt.chars().count(),
@@ -202,11 +228,27 @@ fn pick_ack_phrase(prompt: &str) -> &'static str {
 /// turn actually ran, `Ok(false)` when the inbound buffer was below the
 /// floor.
 ///
-/// This overload loads the configured providers (via `load_providers`),
-/// falling back to tinyhumans when no config is available.
+/// This overload drains the inbound buffer BEFORE loading providers, so a
+/// stalled config load can't let PCM from a subsequent utterance mix into
+/// this turn.
 pub async fn run_turn(request_id: &str) -> Result<bool, String> {
+    let (drained, history) = registry().with_session(request_id, |s| {
+        let drained = s.drain_inbound();
+        let history = recent_dialog_history(s.events(), CONTEXT_EVENT_WINDOW);
+        (drained, history)
+    })?;
+    if drained.len() < MIN_TURN_SAMPLES {
+        log::debug!(
+            "[meet-agent] skipping turn request_id={request_id} samples={}",
+            drained.len()
+        );
+        return Ok(false);
+    }
+
+    // Load providers AFTER the buffer is drained. If config loading
+    // stalls, no PCM from the next utterance can land in this turn.
     let (stt, llm, tts) = load_providers().await;
-    run_turn_with_providers(request_id, &*stt, &*llm, &*tts).await
+    run_turn_inner(request_id, drained, history, &*stt, &*llm, &*tts).await
 }
 
 /// Load providers from the on-disk config when possible. Falls back to
@@ -249,6 +291,17 @@ pub async fn run_turn_with_providers(
         return Ok(false);
     }
 
+    run_turn_inner(request_id, drained, history, stt, llm, tts).await
+}
+
+async fn run_turn_inner(
+    request_id: &str,
+    drained: Vec<i16>,
+    history: Vec<ConversationTurn>,
+    stt: &dyn SpeechToText,
+    llm: &dyn MeetingLLM,
+    tts: &dyn TextToSpeech,
+) -> Result<bool, String> {
     log::info!(
         "[meet-agent] turn start request_id={request_id} samples={}",
         drained.len()
