@@ -125,6 +125,48 @@ fn openrouter_slug_model() {
 }
 
 #[test]
+fn custom_provider_remaps_abstract_tier_to_concrete_default_model() {
+    let mut config = Config::default();
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_ds".to_string(),
+        slug: "deepseek".to_string(),
+        label: "DeepSeek".to_string(),
+        endpoint: "https://api.deepseek.com/v1".to_string(),
+        auth_style: AuthStyle::Bearer,
+        default_model: Some("deepseek-v4-pro".to_string()),
+        ..Default::default()
+    });
+
+    let (_, model) =
+        create_chat_provider_from_string("reasoning", "deepseek:reasoning-v1", &config)
+            .expect("abstract tier should remap to concrete default model");
+    assert_eq!(model, "deepseek-v4-pro");
+}
+
+#[test]
+fn custom_provider_rejects_abstract_tier_without_concrete_default_model() {
+    let mut config = Config::default();
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_ds".to_string(),
+        slug: "deepseek".to_string(),
+        label: "DeepSeek".to_string(),
+        endpoint: "https://api.deepseek.com/v1".to_string(),
+        auth_style: AuthStyle::Bearer,
+        default_model: None,
+        ..Default::default()
+    });
+
+    // Can't use `.expect_err(..)` here because `Box<dyn Provider>` doesn't
+    // implement `Debug`, so the success arm has no Debug to print.
+    let err = match create_chat_provider_from_string("reasoning", "deepseek:reasoning-v1", &config)
+    {
+        Ok(_) => panic!("abstract tier without concrete provider default should fail"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("abstract tier"));
+}
+
+#[test]
 fn orcarouter_slug_model() {
     let mut config = Config::default();
     config.cloud_providers.push(CloudProviderCreds {
