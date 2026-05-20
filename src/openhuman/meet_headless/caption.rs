@@ -16,14 +16,13 @@
 //! - means the `meet_agent` session must already be open before the
 //!   watcher starts — the runner ensures this.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
-use tokio::time::interval;
+use tokio::sync::{oneshot, Mutex};
+use tokio::time::{interval, MissedTickBehavior};
 
 use super::cdp::CdpConn;
 
@@ -34,13 +33,23 @@ const LOG_PREFIX: &str = "[meet-headless-caption]";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Bail out after this many consecutive `Runtime.evaluate` failures.
-/// Usually means the page navigated away (call ended) or the renderer
-/// crashed — same shape as the Shell-side cap.
-const MAX_CONSECUTIVE_ERRORS: u32 = 30;
+/// With exponential backoff each retry is much further apart than the
+/// flat-500ms cadence, so we lower the cap accordingly — 10 retries
+/// with capped 16s backoff is roughly a minute of wall-clock patience
+/// before deciding the page is gone for good.
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+
+/// Cap on the per-row dedup memory. Meet typically renders a few rows
+/// at a time; 200 is enough headroom that a long-running call won't
+/// re-forward already-seen lines, while keeping memory bounded.
+const MAX_SEEN_ROWS: usize = 200;
 
 /// Per-session counter of captions we've forwarded. Lets
 /// `meet_headless_stop` report a useful summary without dragging the
 /// meet_agent registry into the response.
+///
+/// Uses `tokio::sync::Mutex` so we don't have to reason about poison
+/// semantics across the async caption loop.
 static COUNTERS: Lazy<Mutex<HashMap<String, u64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -149,7 +158,7 @@ const DRAIN_SCRIPT: &str = r#"
 
 /// Spawn the polling loop. Returns a shutdown sender — drop or send
 /// `()` on it to stop the watcher.
-pub fn spawn_watcher(
+pub async fn spawn_watcher(
     request_id: String,
     cdp: CdpConn,
     session_id: String,
@@ -158,22 +167,23 @@ pub fn spawn_watcher(
 
     // Initialise the counter so `take_seen_count` reports zero rather
     // than "session not found" for sessions that never saw a caption.
-    COUNTERS
-        .lock()
-        .expect("caption counters poisoned")
-        .insert(request_id.clone(), 0);
+    // Done before spawning so callers can race a stop() against the
+    // watcher's first tick without losing the counter slot.
+    COUNTERS.lock().await.insert(request_id.clone(), 0);
 
     let request_id_for_task = request_id.clone();
     tokio::spawn(async move {
         let mut tick = interval(POLL_INTERVAL);
+        // Without `Delay`, the default `Burst` behaviour would fire the
+        // next 3-4 ticks back-to-back after any slow CDP call,
+        // hammering chromium right when it's already struggling.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Burn the first tick so the page has time to render the captions
         // region before our first drain (same lead-time as the Shell-side
         // listener uses for `__openhumanDrainCaptions`).
         tick.tick().await;
         let mut cdp = cdp;
-        // Compare against the previous snapshot so we only forward a
-        // caption line once even though the DOM keeps re-rendering it.
-        let mut last_key = String::new();
+        let mut state = CaptionDedup::new();
         let mut errors: u32 = 0;
         loop {
             tokio::select! {
@@ -187,7 +197,7 @@ pub fn spawn_watcher(
                     match drain_once(&mut cdp, &session_id).await {
                         Ok(rows) => {
                             errors = 0;
-                            forward_new_rows(&request_id_for_task, &rows, &mut last_key);
+                            state.forward_new_rows(&request_id_for_task, &rows).await;
                         }
                         Err(err) => {
                             errors += 1;
@@ -199,6 +209,20 @@ pub fn spawn_watcher(
                                     "{LOG_PREFIX} giving up after {errors} consecutive errors request_id={request_id_for_task}"
                                 );
                                 break;
+                            }
+                            // 500ms, 1s, 2s, 4s, 8s, 16s (capped). Pair
+                            // with `tick.tick()` for an extra ~POLL_INTERVAL.
+                            let shift = (errors - 1).min(5);
+                            let backoff =
+                                Duration::from_millis(500u64.saturating_mul(1u64 << shift));
+                            tokio::select! {
+                                _ = &mut shutdown_rx => {
+                                    log::info!(
+                                        "{LOG_PREFIX} watcher shutdown during backoff request_id={request_id_for_task}"
+                                    );
+                                    break;
+                                }
+                                _ = tokio::time::sleep(backoff) => {}
                             }
                         }
                     }
@@ -212,12 +236,8 @@ pub fn spawn_watcher(
 
 /// Read the captions-seen counter for a session and remove it. Called
 /// by the runner during stop.
-pub fn take_seen_count(request_id: &str) -> u64 {
-    COUNTERS
-        .lock()
-        .expect("caption counters poisoned")
-        .remove(request_id)
-        .unwrap_or(0)
+pub async fn take_seen_count(request_id: &str) -> u64 {
+    COUNTERS.lock().await.remove(request_id).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,58 +288,76 @@ pub(crate) fn parse_caption_rows(value: &Value) -> Vec<CaptionRow> {
         .collect()
 }
 
-/// Forward any rows we haven't seen this tick to the in-process
-/// meet_agent session. The "what's new" check is a single
-/// serialise-and-compare on the JSON-key of the full snapshot, mirroring
-/// `recipe.js`'s `lastCaptionsKey` logic — Meet re-renders the rolling
-/// transcript every word, so byte-equality is the cheapest dedup.
-fn forward_new_rows(request_id: &str, rows: &[CaptionRow], last_key: &mut String) {
-    let key = match serde_json::to_string(
-        &rows
-            .iter()
-            .map(|r| (r.speaker.as_str(), r.text.as_str()))
-            .collect::<Vec<_>>(),
-    ) {
-        Ok(k) => k,
-        Err(_) => return,
-    };
-    if key == *last_key {
-        return;
-    }
-    *last_key = key;
+/// Per-row dedup state. The Shell-side `recipe.js` used a snapshot
+/// hash of the full visible transcript — but Meet's DOM grows the
+/// current line word-by-word, so any snapshot key changes on every
+/// tick and the old logic forwarded every visible row repeatedly.
+///
+/// Instead, remember each `(speaker, text)` row we've already
+/// forwarded. A `VecDeque` gives us FIFO eviction so the cap removes
+/// the genuinely oldest entry rather than an arbitrary one — important
+/// because evicting a still-visible row would cause it to be
+/// re-forwarded on the next tick.
+struct CaptionDedup {
+    order: VecDeque<(String, String)>,
+    seen: HashSet<(String, String)>,
+}
 
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let registry = crate::openhuman::meet_agent::session::registry();
-    let mut forwarded: u64 = 0;
-    for row in rows {
-        let outcome =
-            registry.with_session(request_id, |s| s.note_caption(&row.speaker, &row.text, now_ms));
-        match outcome {
-            Ok(_) => forwarded += 1,
-            Err(err) => {
-                // Session was closed underneath us (stop race) — log
-                // and stop trying to push more rows this tick.
-                log::debug!(
-                    "{LOG_PREFIX} note_caption failed request_id={request_id} err={err}"
-                );
-                break;
-            }
+impl CaptionDedup {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::with_capacity(MAX_SEEN_ROWS + 1),
+            seen: HashSet::with_capacity(MAX_SEEN_ROWS + 1),
         }
     }
 
-    if forwarded > 0 {
-        if let Ok(mut counters) = COUNTERS.lock() {
+    async fn forward_new_rows(&mut self, request_id: &str, rows: &[CaptionRow]) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let registry = crate::openhuman::meet_agent::session::registry();
+        let mut forwarded: u64 = 0;
+        for row in rows {
+            let key = (row.speaker.clone(), row.text.clone());
+            if self.seen.contains(&key) {
+                continue;
+            }
+            let outcome = registry.with_session(request_id, |s| {
+                s.note_caption(&row.speaker, &row.text, now_ms)
+            });
+            match outcome {
+                Ok(_) => {
+                    forwarded += 1;
+                    self.seen.insert(key.clone());
+                    self.order.push_back(key);
+                    while self.order.len() > MAX_SEEN_ROWS {
+                        if let Some(evicted) = self.order.pop_front() {
+                            self.seen.remove(&evicted);
+                        }
+                    }
+                }
+                Err(err) => {
+                    // Session was closed underneath us (stop race) — log
+                    // and stop trying to push more rows this tick.
+                    log::debug!(
+                        "{LOG_PREFIX} note_caption failed request_id={request_id} err={err}"
+                    );
+                    break;
+                }
+            }
+        }
+
+        if forwarded > 0 {
+            let mut counters = COUNTERS.lock().await;
             if let Some(entry) = counters.get_mut(request_id) {
                 *entry += forwarded;
             }
+            log::debug!(
+                "{LOG_PREFIX} forwarded {forwarded} caption rows request_id={request_id}"
+            );
         }
-        log::debug!(
-            "{LOG_PREFIX} forwarded {forwarded} caption rows request_id={request_id}"
-        );
     }
 }
 
