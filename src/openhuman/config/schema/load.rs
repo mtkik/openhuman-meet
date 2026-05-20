@@ -381,6 +381,186 @@ fn encrypt_optional_secret(
     Ok(())
 }
 
+/// Decrypt all secret fields in the configuration that are marked as encrypted.
+///
+/// Called during config load when `secrets.encrypt` is true. Only decrypts
+/// values that have the `enc:` or `enc2:` prefix; plaintext values are
+/// returned as-is. This is a no-op when encryption is disabled.
+fn decrypt_config_secrets(config: &mut Config, openhuman_dir: &Path) -> Result<()> {
+    if !config.secrets.encrypt {
+        return Ok(());
+    }
+    let store = crate::openhuman::security::SecretStore::new(openhuman_dir, true);
+
+    decrypt_optional_secret(&store, &mut config.api_key, "api_key")?;
+
+    // Channels: decrypt every optional secret field.
+    //
+    // For required (non-Option<String>) secret fields we wrap the value in a
+    // temporary Option, run `decrypt_optional_secret`, then write back via
+    // `unwrap_or_default`. This mirrors the encrypt path and — crucially —
+    // propagates real decryption errors via `?` instead of silently handing
+    // ciphertext back to channel code on a corrupted `enc2:` value.
+    // Plaintext values (no `enc:`/`enc2:` prefix) are passed through
+    // untouched by `SecretStore::decrypt`, so configs written by pre-#1900
+    // builds continue to load correctly.
+    let ch = &mut config.channels_config;
+    if let Some(ref mut tg) = ch.telegram {
+        let mut tok = Some(tg.bot_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "telegram.bot_token")?;
+        tg.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut d) = ch.discord {
+        let mut tok = Some(d.bot_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "discord.bot_token")?;
+        d.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut s) = ch.slack {
+        let mut tok = Some(s.bot_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "slack.bot_token")?;
+        s.bot_token = tok.unwrap_or_default();
+        decrypt_optional_secret(&store, &mut s.app_token, "slack.app_token")?;
+    }
+    if let Some(ref mut m) = ch.mattermost {
+        let mut tok = Some(m.bot_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "mattermost.bot_token")?;
+        m.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut w) = ch.webhook {
+        decrypt_optional_secret(&store, &mut w.secret, "webhook.secret")?;
+    }
+    if let Some(ref mut mx) = ch.matrix {
+        let mut tok = Some(mx.access_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "matrix.access_token")?;
+        mx.access_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut wa) = ch.whatsapp {
+        decrypt_optional_secret(&store, &mut wa.access_token, "whatsapp.access_token")?;
+        decrypt_optional_secret(&store, &mut wa.verify_token, "whatsapp.verify_token")?;
+        decrypt_optional_secret(&store, &mut wa.app_secret, "whatsapp.app_secret")?;
+    }
+    if let Some(ref mut lq) = ch.linq {
+        let mut tok = Some(lq.api_token.clone());
+        decrypt_optional_secret(&store, &mut tok, "linq.api_token")?;
+        lq.api_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut irc) = ch.irc {
+        decrypt_optional_secret(&store, &mut irc.server_password, "irc.server_password")?;
+        decrypt_optional_secret(&store, &mut irc.nickserv_password, "irc.nickserv_password")?;
+        decrypt_optional_secret(&store, &mut irc.sasl_password, "irc.sasl_password")?;
+    }
+    if let Some(ref mut lk) = ch.lark {
+        let mut tok = Some(lk.app_secret.clone());
+        decrypt_optional_secret(&store, &mut tok, "lark.app_secret")?;
+        lk.app_secret = tok.unwrap_or_default();
+        decrypt_optional_secret(&store, &mut lk.encrypt_key, "lark.encrypt_key")?;
+        decrypt_optional_secret(
+            &store,
+            &mut lk.verification_token,
+            "lark.verification_token",
+        )?;
+    }
+    if let Some(ref mut dt) = ch.dingtalk {
+        let mut tok = Some(dt.client_secret.clone());
+        decrypt_optional_secret(&store, &mut tok, "dingtalk.client_secret")?;
+        dt.client_secret = tok.unwrap_or_default();
+    }
+    if let Some(ref mut qq) = ch.qq {
+        let mut tok = Some(qq.app_secret.clone());
+        decrypt_optional_secret(&store, &mut tok, "qq.app_secret")?;
+        qq.app_secret = tok.unwrap_or_default();
+    }
+
+    Ok(())
+}
+
+/// Encrypt all secret fields in the configuration before writing to disk.
+///
+/// Called during `Config::save()` when `secrets.encrypt` is true. Only
+/// encrypts values that are NOT already encrypted. This is a no-op when
+/// encryption is disabled.
+fn encrypt_config_secrets(config: &mut Config) -> Result<()> {
+    if !config.secrets.encrypt {
+        return Ok(());
+    }
+    let parent_dir = config
+        .config_path
+        .parent()
+        .context("Config path must have a parent directory")?;
+    let store = crate::openhuman::security::SecretStore::new(parent_dir, true);
+
+    encrypt_optional_secret(&store, &mut config.api_key, "api_key")?;
+
+    let ch = &mut config.channels_config;
+    if let Some(ref mut tg) = ch.telegram {
+        let mut tok = Some(tg.bot_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "telegram.bot_token")?;
+        tg.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut d) = ch.discord {
+        let mut tok = Some(d.bot_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "discord.bot_token")?;
+        d.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut s) = ch.slack {
+        let mut tok = Some(s.bot_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "slack.bot_token")?;
+        s.bot_token = tok.unwrap_or_default();
+        encrypt_optional_secret(&store, &mut s.app_token, "slack.app_token")?;
+    }
+    if let Some(ref mut m) = ch.mattermost {
+        let mut tok = Some(m.bot_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "mattermost.bot_token")?;
+        m.bot_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut w) = ch.webhook {
+        encrypt_optional_secret(&store, &mut w.secret, "webhook.secret")?;
+    }
+    if let Some(ref mut mx) = ch.matrix {
+        let mut tok = Some(mx.access_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "matrix.access_token")?;
+        mx.access_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut wa) = ch.whatsapp {
+        encrypt_optional_secret(&store, &mut wa.access_token, "whatsapp.access_token")?;
+        encrypt_optional_secret(&store, &mut wa.verify_token, "whatsapp.verify_token")?;
+        encrypt_optional_secret(&store, &mut wa.app_secret, "whatsapp.app_secret")?;
+    }
+    if let Some(ref mut lq) = ch.linq {
+        let mut tok = Some(lq.api_token.clone());
+        encrypt_optional_secret(&store, &mut tok, "linq.api_token")?;
+        lq.api_token = tok.unwrap_or_default();
+    }
+    if let Some(ref mut irc) = ch.irc {
+        encrypt_optional_secret(&store, &mut irc.server_password, "irc.server_password")?;
+        encrypt_optional_secret(&store, &mut irc.nickserv_password, "irc.nickserv_password")?;
+        encrypt_optional_secret(&store, &mut irc.sasl_password, "irc.sasl_password")?;
+    }
+    if let Some(ref mut lk) = ch.lark {
+        let mut tok = Some(lk.app_secret.clone());
+        encrypt_optional_secret(&store, &mut tok, "lark.app_secret")?;
+        lk.app_secret = tok.unwrap_or_default();
+        encrypt_optional_secret(&store, &mut lk.encrypt_key, "lark.encrypt_key")?;
+        encrypt_optional_secret(
+            &store,
+            &mut lk.verification_token,
+            "lark.verification_token",
+        )?;
+    }
+    if let Some(ref mut dt) = ch.dingtalk {
+        let mut tok = Some(dt.client_secret.clone());
+        encrypt_optional_secret(&store, &mut tok, "dingtalk.client_secret")?;
+        dt.client_secret = tok.unwrap_or_default();
+    }
+    if let Some(ref mut qq) = ch.qq {
+        let mut tok = Some(qq.app_secret.clone());
+        encrypt_optional_secret(&store, &mut tok, "qq.app_secret")?;
+        qq.app_secret = tok.unwrap_or_default();
+    }
+
+    Ok(())
+}
+
 const ACTIVE_USER_STATE_FILE: &str = "active_user.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -886,6 +1066,7 @@ impl Config {
                 "Config loaded"
             );
             crate::openhuman::migrations::run_pending(&mut config).await;
+            decrypt_config_secrets(&mut config, &openhuman_dir)?;
             Ok(config)
         } else {
             // Fresh install: there is no legacy on-disk state, so stamp
@@ -960,6 +1141,7 @@ impl Config {
         config.config_path = config_path;
         config.workspace_dir = workspace_dir;
         config.apply_env_overrides();
+        decrypt_config_secrets(&mut config, &openhuman_dir)?;
         Ok(config)
     }
 
@@ -1646,7 +1828,8 @@ impl Config {
     }
 
     pub async fn save(&self) -> Result<()> {
-        let config_to_save = self.clone();
+        let mut config_to_save = self.clone();
+        encrypt_config_secrets(&mut config_to_save)?;
 
         let toml_str =
             toml::to_string_pretty(&config_to_save).context("Failed to serialize config")?;
@@ -1696,14 +1879,16 @@ impl Config {
             .await
             .unwrap_or(false);
         if had_existing_config {
-            fs::copy(&self.config_path, &backup_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to create config backup before atomic replace: {}",
-                        backup_path.display()
-                    )
-                })?;
+            // Copy the encrypted temp file as the backup, NOT the old on-disk
+            // config. The old config may still contain plaintext secrets from
+            // before encryption was wired in (#1900). Using the encrypted
+            // bytes ensures the .bak never leaks plaintext credentials.
+            fs::copy(&temp_path, &backup_path).await.with_context(|| {
+                format!(
+                    "Failed to create config backup before atomic replace: {}",
+                    backup_path.display()
+                )
+            })?;
         }
 
         if let Err(e) = fs::rename(&temp_path, &self.config_path).await {
