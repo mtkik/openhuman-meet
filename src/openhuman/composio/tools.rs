@@ -336,18 +336,19 @@ impl Tool for ComposioListToolkitsTool {
         // the backend tinyhumans tenant (#1710).
         // [#1710 Wave 4] Reload config fresh per execute so a mid-session
         // `composio.mode` toggle takes effect at the very next tool call.
-        // The Arc<Config> snapshot held by `self` was taken at agent-init
-        // time and is otherwise stale relative to subsequent set_api_key /
-        // clear_api_key RPCs.
-        let live_config = match config_rpc::load_config_with_timeout().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "[composio] tool: load_config failed");
-                return Ok(ToolResult::error(format!(
-                    "composio: failed to load live config: {e}"
-                )));
-            }
-        };
+        // Anchor the reload to this tool's original config path rather
+        // than re-resolving process-global `OPENHUMAN_WORKSPACE`; the
+        // tool is scoped to the user/workspace it was created for.
+        let live_config =
+            match config_rpc::reload_config_snapshot_with_timeout(self.config.as_ref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "[composio] tool: load_config failed");
+                    return Ok(ToolResult::error(format!(
+                        "composio: failed to load live config: {e}"
+                    )));
+                }
+            };
         let client = match create_composio_client(&live_config) {
             Ok(ComposioClientKind::Backend(client)) => {
                 tracing::debug!("[composio] list_toolkits.execute: backend variant");
@@ -427,10 +428,14 @@ impl Tool for ComposioListConnectionsTool {
         // were linked and prompt unnecessary re-authorization (#1710).
         // [#1710 Wave 4] Reload config fresh per execute so a mid-session
         // `composio.mode` toggle takes effect at the very next tool call.
-        // The Arc<Config> snapshot held by `self` was taken at agent-init
-        // time and is otherwise stale relative to subsequent set_api_key /
-        // clear_api_key RPCs.
-        let live_config = match config_rpc::load_config_with_timeout().await {
+        // Anchor the reload to this tool's original config path rather
+        // than re-resolving process-global `OPENHUMAN_WORKSPACE`; the
+        // tool is scoped to the user/workspace it was created for.
+        let live_config = match config_rpc::reload_config_snapshot_with_timeout(
+            self.config.as_ref(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "[composio] list_connections.execute: load_config failed");
@@ -539,18 +544,19 @@ impl Tool for ComposioAuthorizeTool {
         // silently routing through the wrong tenant.
         // [#1710 Wave 4] Reload config fresh per execute so a mid-session
         // `composio.mode` toggle takes effect at the very next tool call.
-        // The Arc<Config> snapshot held by `self` was taken at agent-init
-        // time and is otherwise stale relative to subsequent set_api_key /
-        // clear_api_key RPCs.
-        let live_config = match config_rpc::load_config_with_timeout().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "[composio] tool: load_config failed");
-                return Ok(ToolResult::error(format!(
-                    "composio: failed to load live config: {e}"
-                )));
-            }
-        };
+        // Anchor the reload to this tool's original config path rather
+        // than re-resolving process-global `OPENHUMAN_WORKSPACE`; the
+        // tool is scoped to the user/workspace it was created for.
+        let live_config =
+            match config_rpc::reload_config_snapshot_with_timeout(self.config.as_ref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "[composio] tool: load_config failed");
+                    return Ok(ToolResult::error(format!(
+                        "composio: failed to load live config: {e}"
+                    )));
+                }
+            };
         let client = match create_composio_client(&live_config) {
             Ok(ComposioClientKind::Backend(client)) => {
                 tracing::debug!("[composio] authorize.execute: backend variant");
@@ -686,18 +692,19 @@ impl Tool for ComposioListToolsTool {
         // path — is exactly the bug we're closing (#1710).
         // [#1710 Wave 4] Reload config fresh per execute so a mid-session
         // `composio.mode` toggle takes effect at the very next tool call.
-        // The Arc<Config> snapshot held by `self` was taken at agent-init
-        // time and is otherwise stale relative to subsequent set_api_key /
-        // clear_api_key RPCs.
-        let live_config = match config_rpc::load_config_with_timeout().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "[composio] tool: load_config failed");
-                return Ok(ToolResult::error(format!(
-                    "composio: failed to load live config: {e}"
-                )));
-            }
-        };
+        // Anchor the reload to this tool's original config path rather
+        // than re-resolving process-global `OPENHUMAN_WORKSPACE`; the
+        // tool is scoped to the user/workspace it was created for.
+        let live_config =
+            match config_rpc::reload_config_snapshot_with_timeout(self.config.as_ref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "[composio] tool: load_config failed");
+                    return Ok(ToolResult::error(format!(
+                        "composio: failed to load live config: {e}"
+                    )));
+                }
+            };
         let client = match create_composio_client(&live_config) {
             Ok(ComposioClientKind::Backend(client)) => {
                 tracing::debug!("[composio] list_tools.execute: backend variant");
@@ -967,10 +974,14 @@ impl Tool for ComposioExecuteTool {
         // of mode — silently breaking direct mode for tool execution.
         // [#1710 Wave 4] Reload config fresh per execute so a mid-session
         // `composio.mode` toggle takes effect at the very next tool call.
-        // The Arc<Config> snapshot held by `self` was taken at agent-init
-        // time and is otherwise stale relative to subsequent set_api_key /
-        // clear_api_key RPCs.
-        let live_config = match config_rpc::load_config_with_timeout().await {
+        // Anchor the reload to this tool's original config path rather
+        // than re-resolving process-global `OPENHUMAN_WORKSPACE`; the
+        // tool is scoped to the user/workspace it was created for.
+        let live_config = match config_rpc::reload_config_snapshot_with_timeout(
+            self.config.as_ref(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "[composio] tool execute.execute: load_config failed");
