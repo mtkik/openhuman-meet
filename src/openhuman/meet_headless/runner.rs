@@ -39,7 +39,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
 use super::cdp::{result_str, CdpConn};
-use super::{caption, join_flow};
+use super::{audio_bridge, caption, fake_camera, join_flow};
 
 const LOG_PREFIX: &str = "[meet-headless]";
 
@@ -57,7 +57,8 @@ const DEVTOOLS_BANNER: &str = "DevTools listening on ";
 const PROFILE_PREFIX: &str = "openhuman-meet-headless-";
 
 /// Per-session bookkeeping. Owns the child process handle and the
-/// caption watcher abort handle; dropping it must close both.
+/// caption watcher + audio bridge abort handles; dropping it must close
+/// all of them.
 pub struct HeadlessSession {
     pub request_id: String,
     pub meet_url: String,
@@ -67,6 +68,7 @@ pub struct HeadlessSession {
     child: Option<Child>,
     user_data_dir: Option<PathBuf>,
     caption_shutdown: Option<oneshot::Sender<()>>,
+    audio_shutdown: Option<oneshot::Sender<()>>,
 }
 
 /// Summary returned by `meet_headless_stop` for telemetry / smoke tests.
@@ -177,6 +179,7 @@ impl HeadlessSession {
             child: Some(child),
             user_data_dir: Some(user_data_dir),
             caption_shutdown: None,
+            audio_shutdown: None,
         };
 
         // Open a new tab on the Meet URL via the browser-level session,
@@ -226,6 +229,43 @@ impl HeadlessSession {
                 .await;
         session.caption_shutdown = Some(caption_shutdown);
 
+        // Phase 6.3 — Audio bridge. Needs its own CDP connection (third
+        // socket) so its reads/writes don't race with the caption watcher
+        // or join flow. Injection and bridge spawn are best-effort: if the
+        // page doesn't support the Web Audio API (e.g. very old Chromium)
+        // we log and continue — captions still work.
+        let (audio_cdp, audio_session) = match open_existing_page(&ws_url, meet_url).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                log::warn!(
+                    "{LOG_PREFIX} audio bridge: failed to open CDP connection: {err} \
+                     — audio bridge disabled"
+                );
+                return Ok(session);
+            }
+        };
+
+        let mut audio_cdp = audio_cdp;
+        if let Err(err) =
+            audio_bridge::inject_audio_scripts(&mut audio_cdp, &audio_session).await
+        {
+            log::warn!(
+                "{LOG_PREFIX} audio bridge injection failed: {err} \
+                 — audio bridge disabled"
+            );
+        } else {
+            let audio_shutdown = audio_bridge::spawn_audio_bridge(
+                request_id.to_string(),
+                audio_cdp,
+                audio_session,
+            )
+            .await;
+            session.audio_shutdown = Some(audio_shutdown);
+            log::info!(
+                "{LOG_PREFIX} audio bridge started request_id={request_id}"
+            );
+        }
+
         Ok(session)
     }
 
@@ -255,6 +295,11 @@ impl HeadlessSession {
         // 1. Caption watcher first so it stops calling note_caption on
         //    the about-to-be-dropped meet_agent session.
         if let Some(tx) = session.caption_shutdown.take() {
+            let _ = tx.send(());
+        }
+
+        // 1b. Audio bridge — same pattern, stop before meet_agent teardown.
+        if let Some(tx) = session.audio_shutdown.take() {
             let _ = tx.send(());
         }
 
@@ -297,6 +342,9 @@ impl Drop for HeadlessSession {
         // no-op; this Drop is the safety net for the *abnormal* paths
         // (panic, early-return error during start, parent task abort).
         if let Some(tx) = self.caption_shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.audio_shutdown.take() {
             let _ = tx.send(());
         }
         // kill_on_drop(true) on the Child handle takes care of the
@@ -483,14 +531,32 @@ pub(super) fn locate_chromium() -> Result<PathBuf, String> {
     )
 }
 
-/// Open the browser-level CDP socket, create a new tab pointing at
-/// `meet_url`, then attach a flat session to it. Returns both the
-/// connection (now multiplexed onto that session) and the session id.
+/// Open the browser-level CDP socket, inject the fake-camera override,
+/// create a new tab pointing at `meet_url`, then attach a flat session
+/// to it. Returns both the connection (now multiplexed onto that session)
+/// and the session id.
+///
+/// The fake-camera override is injected via
+/// `Page.addScriptToEvaluateOnNewDocument` on the browser-level session
+/// *before* `Target.createTarget`, so it takes effect before any page JS
+/// runs inside the new tab.
 async fn open_meet_tab(
     browser_ws_url: &str,
     meet_url: &str,
 ) -> Result<(CdpConn, String), String> {
     let mut cdp = CdpConn::open(browser_ws_url).await?;
+
+    // Enable Page domain on the browser session so
+    // addScriptToEvaluateOnNewDocument works.
+    let _ = cdp.call("Page.enable", Value::Null, None).await;
+
+    // Inject fake-camera override before any tab is created — the
+    // script will run at document-start for every new page.
+    if let Err(err) = fake_camera::inject_fake_camera(&mut cdp, None).await {
+        log::warn!(
+            "{LOG_PREFIX} fake-camera injection failed (will use Chrome flags): {err}"
+        );
+    }
 
     let result = cdp
         .call(
