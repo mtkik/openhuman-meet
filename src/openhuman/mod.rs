@@ -46,6 +46,7 @@ pub mod mcp_client;
 pub mod mcp_server;
 pub mod meet;
 pub mod meet_agent;
+pub mod meet_headless;
 pub mod memory;
 pub mod migration;
 pub mod migrations;
