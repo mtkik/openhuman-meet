@@ -10,6 +10,7 @@
 //! (`readOnlyHint: false`, `destructiveHint: true`).
 
 mod protocol;
+mod session;
 mod stdio;
 mod tools;
 
