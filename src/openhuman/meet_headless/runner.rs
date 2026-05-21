@@ -531,43 +531,34 @@ pub(super) fn locate_chromium() -> Result<PathBuf, String> {
     )
 }
 
-/// Open the browser-level CDP socket, inject the fake-camera override,
-/// create a new tab pointing at `meet_url`, then attach a flat session
-/// to it. Returns both the connection (now multiplexed onto that session)
-/// and the session id.
+/// Open the browser-level CDP socket, create a new tab, inject the
+/// fake-camera override on the **target-level** session, then navigate
+/// to `meet_url`. Returns both the connection (multiplexed onto that
+/// session) and the session id.
 ///
 /// The fake-camera override is injected via
-/// `Page.addScriptToEvaluateOnNewDocument` on the browser-level session
-/// *before* `Target.createTarget`, so it takes effect before any page JS
-/// runs inside the new tab.
+/// `Page.addScriptToEvaluateOnNewDocument` on the target session (not
+/// the browser session) so it runs before any page JS. The tab is first
+/// created with `about:blank` to get a target session, then the script
+/// is injected, and finally the page navigates to the Meet URL.
 async fn open_meet_tab(
     browser_ws_url: &str,
     meet_url: &str,
 ) -> Result<(CdpConn, String), String> {
     let mut cdp = CdpConn::open(browser_ws_url).await?;
 
-    // Enable Page domain on the browser session so
-    // addScriptToEvaluateOnNewDocument works.
-    let _ = cdp.call("Page.enable", Value::Null, None).await;
-
-    // Inject fake-camera override before any tab is created — the
-    // script will run at document-start for every new page.
-    if let Err(err) = fake_camera::inject_fake_camera(&mut cdp, None).await {
-        log::warn!(
-            "{LOG_PREFIX} fake-camera injection failed (will use Chrome flags): {err}"
-        );
-    }
-
+    // Step 1: Create a new tab with about:blank so we get a targetId.
     let result = cdp
         .call(
             "Target.createTarget",
-            serde_json::json!({ "url": meet_url, "background": false }),
+            serde_json::json!({ "url": "about:blank" }),
             None,
         )
         .await?;
     let target_id = result_str(&result, &["targetId"])
         .ok_or_else(|| format!("Target.createTarget missing targetId: {result}"))?;
 
+    // Step 2: Attach to the target to get a page-level session.
     let attach = cdp
         .call(
             "Target.attachToTarget",
@@ -577,6 +568,31 @@ async fn open_meet_tab(
         .await?;
     let session_id = result_str(&attach, &["sessionId"])
         .ok_or_else(|| format!("Target.attachToTarget missing sessionId: {attach}"))?;
+
+    // Step 3: Enable Page domain on the target session.
+    let _ = cdp
+        .call("Page.enable", Value::Null, Some(&session_id))
+        .await;
+
+    // Step 4: Inject fake-camera override on the target session so it
+    // runs before any page JS on subsequent navigations.
+    if let Err(err) =
+        fake_camera::inject_fake_camera(&mut cdp, Some(&session_id)).await
+    {
+        log::warn!(
+            "{LOG_PREFIX} fake-camera injection failed (will use Chrome flags): {err}"
+        );
+    }
+
+    // Step 5: Navigate to the actual Meet URL. The fake-camera override
+    // is already active via addScriptToEvaluateOnNewDocument.
+    let _ = cdp
+        .call(
+            "Page.navigate",
+            serde_json::json!({ "url": meet_url }),
+            Some(&session_id),
+        )
+        .await;
 
     Ok((cdp, session_id))
 }

@@ -55,6 +55,8 @@ const FAKE_CAMERA_OVERRIDE_JS: &str = r##"(function() {
         }
 
         // --- Fake audio: silent 0 Hz oscillator via AudioContext ---
+        // Expose audioCtx + dest on window so the audio bridge can feed
+        // its playback PCM into the same destination that Meet uses.
         if (hasAudio) {
             var audioCtx = new AudioContext({ sampleRate: 16000 });
             var oscillator = audioCtx.createOscillator();
@@ -64,6 +66,12 @@ const FAKE_CAMERA_OVERRIDE_JS: &str = r##"(function() {
             var dest = audioCtx.createMediaStreamDestination();
             oscillator.connect(dest);
             oscillator.start();
+
+            // Export for audio_bridge playback pipeline
+            window.__openhuman_fake_audio = {
+                ctx: audioCtx,
+                dest: dest
+            };
 
             var audioStream = dest.stream;
             streams.push(audioStream);

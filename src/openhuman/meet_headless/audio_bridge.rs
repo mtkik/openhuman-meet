@@ -39,10 +39,12 @@ const SAMPLES_PER_TICK: usize = 1600;
 
 /// Injects `window.__openhuman_capture` with `start()` and `drain()`.
 ///
-/// `start()` creates an AudioContext at 16 kHz, acquires the mic stream
-/// (Chromium's `--use-fake-device-for-media-stream` flag supplies fake
-/// audio in headless mode), and pipes Int16 samples into an accumulating
-/// buffer via `ScriptProcessorNode`.
+/// `start()` creates an AudioContext at 16 kHz and captures **page audio**
+/// (other participants' voices) by monitoring all `<audio>` and `<video>`
+/// elements on the page via `MediaElementAudioSourceNode`, falling back to
+/// a silent stream when no media elements are present yet. Each element's
+/// source is connected through a `ScriptProcessorNode` that accumulates
+/// Int16 samples into a buffer.
 ///
 /// `drain()` returns the accumulated samples as a Base64 string and
 /// clears the buffer. Returns `""` when nothing has accumulated.
@@ -51,18 +53,17 @@ const AUDIO_CAPTURE_SETUP_JS: &str = r#"
   if (window.__openhuman_capture) return;
 
   let ctx = null;
-  let stream = null;
   let processor = null;
   let chunks = [];       // accumulated Int16 chunks
   let totalLen = 0;      // total Int16 samples accumulated
+  let connectedElements = new WeakSet(); // track already-connected media elements
 
   window.__openhuman_capture = {
     start: async function() {
       if (ctx) return;
       ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const src = ctx.createMediaStreamSource(stream);
-      // ScriptProcessorNode for broad compat inside injected contexts
+
+      // ScriptProcessorNode for capturing PCM from page audio elements
       processor = ctx.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = function(e) {
         const f32 = e.inputBuffer.getChannelData(0);
@@ -76,8 +77,34 @@ const AUDIO_CAPTURE_SETUP_JS: &str = r#"
         chunks.push(i16);
         totalLen += i16.length;
       };
-      src.connect(processor);
+
+      // Connect the processor to the destination so the pipeline is live
       processor.connect(ctx.destination);
+
+      // Scan for audio/video elements and connect them to the processor.
+      // Google Meet plays remote participants' audio through <audio> elements.
+      function connectMediaElements() {
+        const elements = document.querySelectorAll('audio, video');
+        elements.forEach(function(el) {
+          if (connectedElements.has(el)) return;
+          try {
+            // MediaElementAudioSourceNode can only be created once per element
+            if (!el._openhuman_source) {
+              el._openhuman_source = ctx.createMediaElementSource(el);
+            }
+            el._openhuman_source.connect(processor);
+            connectedElements.add(el);
+          } catch(e) {
+            // May already be connected or CORS restricted; skip silently
+          }
+        });
+      }
+
+      // Initial scan
+      connectMediaElements();
+
+      // Re-scan periodically — Meet may add new audio elements as participants join
+      setInterval(connectMediaElements, 2000);
     },
 
     drain: function() {
@@ -90,11 +117,13 @@ const AUDIO_CAPTURE_SETUP_JS: &str = r#"
       }
       chunks = [];
       totalLen = 0;
-      // Convert to base64
+      // Convert to base64 efficiently using chunked fromCharCode
       const bytes = new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength);
+      const chunkSize = 8192;
       let binary = "";
-      for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        const end = Math.min(i + chunkSize, bytes.length);
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, end));
       }
       return btoa(binary);
     }
@@ -105,11 +134,14 @@ const AUDIO_CAPTURE_SETUP_JS: &str = r#"
 /// Injects `window.__openhuman_playback` with `init()`, `feed(b64)`, and
 /// `getStream()`.
 ///
-/// `init()` creates an AudioContext at 16 kHz plus a
-/// `MediaStreamDestination` whose stream can be wired up as a fake mic.
+/// `init()` creates an AudioContext at 16 kHz. If `window.__openhuman_fake_audio`
+/// exists (set by the fake-camera override), its `MediaStreamDestination` is
+/// reused so playback audio feeds into the same stream Meet sees as the mic.
+/// Otherwise a new `MediaStreamDestination` is created.
 ///
 /// `feed(b64)` decodes a Base64 string → Int16Array → Float32Array (÷32768)
-/// and plays it through a `BufferSourceNode` connected to the destination.
+/// and plays it through a `BufferSourceNode` with precise scheduling (`nextStartTime`)
+/// to avoid jitter and popping between consecutive chunks.
 ///
 /// `getStream()` returns the `MediaStream` from the destination for use
 /// as a microphone source.
@@ -119,10 +151,20 @@ const AUDIO_PLAYBACK_SETUP_JS: &str = r#"
 
   let ctx = null;
   let dest = null;
+  let nextStartTime = 0;
 
   window.__openhuman_playback = {
     init: function() {
       if (ctx) return;
+
+      // Reuse the fake-camera's AudioContext + destination if available,
+      // so playback audio flows through the same stream Meet consumes.
+      if (window.__openhuman_fake_audio) {
+        ctx = window.__openhuman_fake_audio.ctx;
+        dest = window.__openhuman_fake_audio.dest;
+        return;
+      }
+
       ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       dest = ctx.createMediaStreamDestination();
     },
@@ -145,13 +187,21 @@ const AUDIO_PLAYBACK_SETUP_JS: &str = r#"
           f32[i] = i16[i] / 32768.0;
         }
 
-        // Create AudioBuffer and play
+        // Create AudioBuffer and play with precise scheduling
         const buf = ctx.createBuffer(1, f32.length, 16000);
         buf.getChannelData(0).set(f32);
         const src = ctx.createBufferSource();
         src.buffer = buf;
         src.connect(dest);
-        src.start();
+
+        // Schedule seamlessly after the previous chunk, or immediately
+        // if this is the first chunk or there's a gap.
+        const now = ctx.currentTime;
+        if (nextStartTime < now) {
+          nextStartTime = now;
+        }
+        src.start(nextStartTime);
+        nextStartTime += buf.duration;
       } catch (e) {
         // swallow — playback errors shouldn't crash the bridge
       }
