@@ -9,7 +9,7 @@ const LOG_PREFIX: &str = "[meet-headless-camera]";
 ///
 /// Injected via CDP `Page.addScriptToEvaluateOnNewDocument` so it runs before
 /// any page JavaScript (i.e. before Google Meet loads).
-const FAKE_CAMERA_OVERRIDE_JS: &str = r##"(function() {
+pub(crate) const FAKE_CAMERA_OVERRIDE_JS: &str = r##"(function() {
     "use strict";
 
     // Guard: only run in a browser-like environment

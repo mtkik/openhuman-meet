@@ -34,6 +34,9 @@ pub mod rpc;
 pub mod runner;
 pub mod schemas;
 
+#[cfg(test)]
+mod integration_tests;
+
 pub use runner::{HeadlessSession, SessionSummary};
 pub use schemas::{
     all_controller_schemas as all_meet_headless_controller_schemas,

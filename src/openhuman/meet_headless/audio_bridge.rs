@@ -48,7 +48,7 @@ const SAMPLES_PER_TICK: usize = 1600;
 ///
 /// `drain()` returns the accumulated samples as a Base64 string and
 /// clears the buffer. Returns `""` when nothing has accumulated.
-const AUDIO_CAPTURE_SETUP_JS: &str = r#"
+pub(crate) const AUDIO_CAPTURE_SETUP_JS: &str = r#"
 (() => {
   if (window.__openhuman_capture) return;
 
@@ -145,7 +145,7 @@ const AUDIO_CAPTURE_SETUP_JS: &str = r#"
 ///
 /// `getStream()` returns the `MediaStream` from the destination for use
 /// as a microphone source.
-const AUDIO_PLAYBACK_SETUP_JS: &str = r#"
+pub(crate) const AUDIO_PLAYBACK_SETUP_JS: &str = r#"
 (() => {
   if (window.__openhuman_playback) return;
 
@@ -219,13 +219,13 @@ const AUDIO_PLAYBACK_SETUP_JS: &str = r#"
 // ---------------------------------------------------------------------------
 
 /// Encode a slice of PCM16LE samples as a Base64 string.
-pub(crate) fn pcm_to_base64(samples: &[i16]) -> String {
+pub fn pcm_to_base64(samples: &[i16]) -> String {
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     B64.encode(&bytes)
 }
 
 /// Decode a Base64 string into PCM16LE samples.
-pub(crate) fn base64_to_pcm(b64: &str) -> Result<Vec<i16>, String> {
+pub fn base64_to_pcm(b64: &str) -> Result<Vec<i16>, String> {
     if b64.is_empty() {
         return Ok(Vec::new());
     }
@@ -246,7 +246,7 @@ pub(crate) fn base64_to_pcm(b64: &str) -> Result<Vec<i16>, String> {
 // ---------------------------------------------------------------------------
 
 /// Returns `true` when every sample's absolute value is ≤ `threshold`.
-pub(crate) fn is_silence(samples: &[i16], threshold: i16) -> bool {
+pub fn is_silence(samples: &[i16], threshold: i16) -> bool {
     samples.iter().all(|&s| s.abs() <= threshold)
 }
 

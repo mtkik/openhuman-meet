@@ -268,7 +268,7 @@ async fn drain_once(cdp: &mut CdpConn, session_id: &str) -> Result<Vec<CaptionRo
 
 /// Parse the array of `{speaker, text}` rows returned by `DRAIN_SCRIPT`.
 /// Split out so tests can exercise it without a live chromium.
-pub(crate) fn parse_caption_rows(value: &Value) -> Vec<CaptionRow> {
+pub fn parse_caption_rows(value: &Value) -> Vec<CaptionRow> {
     let Some(arr) = value.as_array() else {
         return Vec::new();
     };

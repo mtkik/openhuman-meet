@@ -395,7 +395,7 @@ pub fn cleanup_stale_profiles() {
 /// Strip the per-launch UUID token from a DevTools WebSocket URL before
 /// logging. The token grants full Runtime.evaluate access to the live
 /// Meet session, so an info-level log leak is effectively an RCE leak.
-pub(super) fn redact_ws_url(url: &str) -> String {
+pub fn redact_ws_url(url: &str) -> String {
     match url.rfind('/') {
         Some(idx) => format!("{}*****", &url[..=idx]),
         None => "*****".to_string(),
@@ -476,7 +476,7 @@ async fn read_devtools_url(
 
 /// Pull the `ws://...` URL out of a `DevTools listening on ws://...`
 /// banner line. Returns `None` for any other line.
-pub(super) fn parse_devtools_line(line: &str) -> Option<String> {
+pub fn parse_devtools_line(line: &str) -> Option<String> {
     let rest = line.strip_prefix(DEVTOOLS_BANNER)?;
     let url = rest.split_whitespace().next()?;
     if !url.starts_with("ws://") && !url.starts_with("wss://") {
